@@ -1,21 +1,28 @@
 name: Update financial reports calendar
 
+# Run on demand from the Actions tab, and automatically on the first of each
+# month at 09:17 UTC.
 on:
   workflow_dispatch:
   schedule:
     - cron: "17 9 1 * *"
 
 permissions:
+  # Read repository files; publish the generated artifact to GitHub Pages;
+  # authenticate the Pages deployment with GitHub's OpenID Connect token.
   contents: read
   pages: write
   id-token: write
 
 concurrency:
+  # Serialize Pages deployments so two runs cannot deploy at the same time.
   group: pages
   cancel-in-progress: false
 
 jobs:
   build:
+    # This is a short-lived GitHub-hosted Ubuntu virtual machine, not a
+    # Docker container or a Kubernetes workload.
     runs-on: ubuntu-latest
     steps:
       - name: Check out repository
@@ -28,21 +35,28 @@ jobs:
 
       - name: Generate calendar
         env:
+          # The API key is injected from GitHub Actions secrets and is not
+          # stored in the repository or written into the published calendar.
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+        # Fetch earnings data for the watchlist and write dist/financial-reports.ics.
         run: python3 scripts/generate_financial_reports_calendar.py --horizon 12month
 
       - name: Upload Pages artifact
+        # Package the entire dist directory for the separate deployment job.
         uses: actions/upload-pages-artifact@v3
         with:
           path: dist
 
   deploy:
+    # Do not deploy unless the calendar was generated and uploaded successfully.
     needs: build
     runs-on: ubuntu-latest
     environment:
+      # Records the deployment in GitHub's protected github-pages environment.
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Deploy to GitHub Pages
         id: deployment
+        # Publishes the uploaded dist artifact; page_url is exposed above.
         uses: actions/deploy-pages@v4
