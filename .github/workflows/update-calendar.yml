@@ -33,6 +33,11 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install Python dependencies
+        # setup-python installs the interpreter only; install packages required
+        # by the generator, including python-dotenv for local .env support.
+        run: python3 -m pip install --requirement requirements.txt
+
       - name: Generate calendar
         env:
           # The API key is injected from GitHub Actions secrets and is not
