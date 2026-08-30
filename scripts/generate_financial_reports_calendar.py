@@ -41,10 +41,16 @@ class EarningsEvent:
     """The normalized data needed to render one all-day calendar event."""
     symbol: str
     name: str
+    # the date the provider expects the report to be released, which may be revised
+    # and it will be placed in the calendar as an all-day event on that date
     report_date: date
+    # the fiscal quarter or year that the report covers, 
+    # for Q2, it usually is the last day of the quarter, e.g. 2026-06-30
+    # while some corporation is wild and may use any other date.
     fiscal_date_ending: str = ""
     estimate: str = ""
     currency: str = ""
+    rescheduled_to: date | None = None
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,6 +74,13 @@ def parse_args() -> argparse.Namespace:
         "--calendar-name",
         default="Financial Reports Watchlist",
         help="Calendar display name embedded in the .ics file.",
+    )
+    parser.add_argument(
+        "--previous-ics",
+        help=(
+            "Previously published .ics feed. Revised near-term report dates are retained "
+            "there as reschedule notices until their original date passes."
+        ),
     )
     return parser.parse_args()
 
@@ -139,10 +152,12 @@ def parse_date(value: str) -> date | None:
     value = value.strip()
     if not value or value.lower() in {"none", "n/a", "nan"}:
         return None
-    try:
-        return datetime.strptime(value, "%Y-%m-%d").date()
-    except ValueError:
-        return None
+    for date_format in ("%Y-%m-%d", "%Y%m%d"):
+        try:
+            return datetime.strptime(value, date_format).date()
+        except ValueError:
+            continue
+    return None
 
 
 def parse_events(csv_text: str, companies: dict[str, Company]) -> list[EarningsEvent]:
@@ -184,6 +199,126 @@ def parse_events(csv_text: str, companies: dict[str, Company]) -> list[EarningsE
         )
 
     return sorted(set(events), key=lambda event: (event.report_date, event.symbol))
+
+
+def unfold_ical_lines(contents: str) -> list[str]:
+    """Unfold RFC 5545 continuation lines before reading an existing feed."""
+    lines: list[str] = []
+    for line in contents.splitlines():
+        if line.startswith((" ", "\t")) and lines:
+            lines[-1] += line[1:]
+        else:
+            lines.append(line)
+    return lines
+
+
+def ical_unescape(value: str) -> str:
+    """Decode the text escaping used in fields written by ical_escape."""
+    return (
+        value.replace("\\n", "\n")
+        .replace("\\,", ",")
+        .replace("\\;", ";")
+        .replace("\\\\", "\\")
+    )
+
+
+def read_previous_events(path: Path) -> list[EarningsEvent]:
+    """Read events from the last published feed, tolerating a missing first-run file."""
+    if not path.exists():
+        return []
+
+    events: list[EarningsEvent] = []
+    event_fields: dict[str, str] | None = None
+    for line in unfold_ical_lines(path.read_text(encoding="utf-8-sig")):
+        if line == "BEGIN:VEVENT":
+            event_fields = {}
+        elif line == "END:VEVENT" and event_fields is not None:
+            description = ical_unescape(event_fields.get("DESCRIPTION", ""))
+            description_fields = {
+                key.strip(): value.strip()
+                for key, _, value in (entry.partition(":") for entry in description.splitlines())
+                if key and value
+            }
+            report_date = parse_date(description_fields.get("Report date", ""))
+            symbol = description_fields.get("Symbol", "").upper()
+            if report_date and symbol:
+                rescheduled_to = parse_date(event_fields.get("X-FINANCIAL-REPORT-RESCHEDULED-TO", ""))
+                events.append(
+                    EarningsEvent(
+                        symbol=symbol,
+                        name=description_fields.get("Company", symbol),
+                        report_date=report_date,
+                        fiscal_date_ending=description_fields.get("Fiscal period ending", ""),
+                        estimate=description_fields.get("EPS estimate", "").split(" ")[0],
+                        rescheduled_to=rescheduled_to,
+                    )
+                )
+            event_fields = None
+        elif event_fields is not None and ":" in line:
+            key, value = line.split(":", 1)
+            # DTSTART;VALUE=DATE is not currently needed because the description
+            # preserves the original date in a format shared by this generator.
+            event_fields[key] = value
+    return events
+
+
+def same_reporting_period(previous: EarningsEvent, current: EarningsEvent) -> bool:
+    """Return whether two provider rows represent the same reporting quarter."""
+    if previous.symbol != current.symbol:
+        return False
+    if previous.fiscal_date_ending and current.fiscal_date_ending:
+        return previous.fiscal_date_ending == current.fiscal_date_ending
+    return abs((previous.report_date - current.report_date).days) < 31
+
+
+def retain_rescheduled_events(
+    events: list[EarningsEvent], previous_events: Iterable[EarningsEvent], today: date
+) -> list[EarningsEvent]:
+    """Keep a visible old-date event when a near-term earnings date is revised.
+
+    The provider's current row remains the active earnings event.  The old row is
+    retained only through its original date and is labelled with the new date, so
+    subscribers can see the revision without a separate notification event.
+    """
+    retained: dict[str, EarningsEvent] = {event_uid(event): event for event in events}
+
+    for previous in previous_events:
+        # no interest in events that have already passed
+        if previous.report_date < today:
+            continue
+
+        matching_current = [
+            event for event in events if same_reporting_period(previous, event)
+        ]
+        if any(event.report_date == previous.report_date for event in matching_current):
+            # The provider still reports this date, so it is an active event, not
+            # a revision notice.
+            continue
+
+        """rescheduling logic"""
+        if previous.rescheduled_to:
+            # Carry a previous revision forward, updating its destination if the
+            # provider has moved the report date again.
+            destination = matching_current[0].report_date if matching_current else previous.rescheduled_to
+        elif matching_current:
+            destination = matching_current[0].report_date
+        else:
+            continue
+
+        if abs((destination - previous.report_date).days) >= 31:
+            continue
+
+        retained[event_uid(previous)] = EarningsEvent(
+            symbol=previous.symbol,
+            name=previous.name,
+            report_date=previous.report_date,
+            fiscal_date_ending=previous.fiscal_date_ending,
+            estimate=previous.estimate,
+            currency=previous.currency,
+            rescheduled_to=destination,
+        )
+
+    return sorted(retained.values(), key=lambda event: (event.report_date, event.symbol, event.rescheduled_to is not None))
 
 
 def ical_escape(value: str) -> str:
@@ -232,6 +367,8 @@ def event_description(event: EarningsEvent) -> str:
     if event.estimate:
         suffix = f" {event.currency}" if event.currency else ""
         lines.append(f"EPS estimate: {event.estimate}{suffix}")
+    if event.rescheduled_to:
+        lines.append(f"Rescheduled to: {event.rescheduled_to.isoformat()}")
     lines.append("Source: Alpha Vantage Earnings Calendar")
     return "\n".join(lines)
 
@@ -255,6 +392,8 @@ def build_calendar(events: Iterable[EarningsEvent], calendar_name: str) -> str:
         # All-day iCalendar events use an exclusive end date, hence next day.
         end = start + timedelta(days=1)
         summary = f"{event.symbol} financial report"
+        if event.rescheduled_to:
+            summary += f" — rescheduled to {event.rescheduled_to.strftime('%b %-d')}"
         lines.extend(
             [
                 "BEGIN:VEVENT",
@@ -264,6 +403,11 @@ def build_calendar(events: Iterable[EarningsEvent], calendar_name: str) -> str:
                 f"DTEND;VALUE=DATE:{end.strftime('%Y%m%d')}",
                 f"SUMMARY:{ical_escape(summary)}",
                 f"DESCRIPTION:{ical_escape(event_description(event))}",
+                *(
+                    ["X-FINANCIAL-REPORT-STATUS:RESCHEDULED", f"X-FINANCIAL-REPORT-RESCHEDULED-TO:{event.rescheduled_to.strftime('%Y%m%d')}"]
+                    if event.rescheduled_to
+                    else []
+                ),
                 "TRANSP:TRANSPARENT",
                 "END:VEVENT",
             ]
@@ -290,6 +434,8 @@ def main() -> int:
     companies = read_watchlist(Path(args.watchlist))
     source_csv = read_source_csv(args)
     events = parse_events(source_csv, companies)
+    previous_events = read_previous_events(Path(args.previous_ics)) if args.previous_ics else []
+    events = retain_rescheduled_events(events, previous_events, date.today())
     calendar = build_calendar(events, args.calendar_name)
     write_calendar(Path(args.output), calendar)
 
@@ -298,6 +444,9 @@ def main() -> int:
     missing_symbols = sorted(set(companies) - set(matched_symbols))
 
     print(f"Wrote {len(events)} events to {args.output}")
+    retained_count = sum(event.rescheduled_to is not None for event in events)
+    if retained_count:
+        print(f"Retained {retained_count} rescheduled event(s) through their original date.")
     if matched_symbols:
         print("Matched symbols: " + ", ".join(matched_symbols))
     if missing_symbols:

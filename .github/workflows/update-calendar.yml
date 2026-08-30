@@ -38,13 +38,26 @@ jobs:
         # by the generator, including python-dotenv for local .env support.
         run: python3 -m pip install --requirement requirements.txt
 
+      - name: Download currently published calendar
+        # A runner is fresh on every run. Before this run deploys, Pages still
+        # serves the prior feed, which lets the generator preserve a revised
+        # old-date event until that original date has passed. The first run has
+        # no prior feed, so a download failure is expected and harmless.
+        run: >-
+          curl --fail --location --silent --show-error
+          --output previous-financial-reports.ics
+          "https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/financial-reports.ics?run=${{ github.run_id }}"
+          || rm -f previous-financial-reports.ics
+
       - name: Generate calendar
         env:
           # The API key is injected from GitHub Actions secrets and is not
           # stored in the repository or written into the published calendar.
           ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
         # Fetch earnings data for the watchlist and write dist/financial-reports.ics.
-        run: python3 scripts/generate_financial_reports_calendar.py --horizon 12month
+        run: >-
+          python3 scripts/generate_financial_reports_calendar.py --horizon 12month
+          --previous-ics previous-financial-reports.ics
 
       - name: Upload Pages artifact
         # Package the entire dist directory for the separate deployment job.

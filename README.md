@@ -56,6 +56,15 @@ https://YOUR_GITHUB_USERNAME.github.io/YOUR_REPO_NAME/financial-reports.ics
 
 Google Calendar refresh timing is controlled by Google and is not immediate. The source calendar will be regenerated monthly by GitHub Actions.
 
+### Revised earnings dates
+
+Before publishing a new feed, the workflow downloads the currently published
+calendar. If Alpha Vantage moves a company’s report date by less than 31 days
+for the same fiscal period, the feed keeps the old, future event and labels it
+for example as `NVDA financial report — rescheduled to Oct 29`. It also includes
+the normal event on the new date. The labelled old event is removed after its
+original date has passed.
+
 ## Useful Commands
 
 Generate with a 12-month lookahead:
