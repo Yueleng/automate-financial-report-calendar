@@ -44,10 +44,11 @@ class EarningsEvent:
     # the date the provider expects the report to be released, which may be revised
     # and it will be placed in the calendar as an all-day event on that date
     report_date: date
-    # the fiscal quarter or year that the report covers, 
+    # The fiscal quarter or year that the report covers.
     # for Q2, it usually is the last day of the quarter, e.g. 2026-06-30
     # while some corporation is wild and may use any other date.
-    fiscal_date_ending: str = ""
+    # for example, NVDA's Q2 2026 report covers the period ending 2026-07-31
+    fiscal_date_ending: str
     estimate: str = ""
     currency: str = ""
     rescheduled_to: date | None = None
@@ -186,13 +187,17 @@ def parse_events(csv_text: str, companies: dict[str, Company]) -> list[EarningsE
         if report_date is None:
             continue
 
+        fiscal_date_ending = parse_date(row.get("fiscalDateEnding") or "")
+        if fiscal_date_ending is None:
+            continue
+
         company = companies[symbol]
         events.append(
             EarningsEvent(
                 symbol=symbol,
                 name=company.name,
                 report_date=report_date,
-                fiscal_date_ending=(row.get("fiscalDateEnding") or "").strip(),
+                fiscal_date_ending=fiscal_date_ending.isoformat(),
                 estimate=(row.get("estimate") or "").strip(),
                 currency=(row.get("currency") or "").strip(),
             )
@@ -240,15 +245,18 @@ def read_previous_events(path: Path) -> list[EarningsEvent]:
                 if key and value
             }
             report_date = parse_date(description_fields.get("Report date", ""))
+            fiscal_date_ending = parse_date(
+                description_fields.get("Fiscal period ending", "")
+            )
             symbol = description_fields.get("Symbol", "").upper()
-            if report_date and symbol:
+            if report_date and fiscal_date_ending and symbol:
                 rescheduled_to = parse_date(event_fields.get("X-FINANCIAL-REPORT-RESCHEDULED-TO", ""))
                 events.append(
                     EarningsEvent(
                         symbol=symbol,
                         name=description_fields.get("Company", symbol),
                         report_date=report_date,
-                        fiscal_date_ending=description_fields.get("Fiscal period ending", ""),
+                        fiscal_date_ending=fiscal_date_ending.isoformat(),
                         estimate=description_fields.get("EPS estimate", "").split(" ")[0],
                         rescheduled_to=rescheduled_to,
                     )
@@ -264,11 +272,10 @@ def read_previous_events(path: Path) -> list[EarningsEvent]:
 
 def same_reporting_period(previous: EarningsEvent, current: EarningsEvent) -> bool:
     """Return whether two provider rows represent the same reporting quarter."""
-    if previous.symbol != current.symbol:
-        return False
-    if previous.fiscal_date_ending and current.fiscal_date_ending:
-        return previous.fiscal_date_ending == current.fiscal_date_ending
-    return abs((previous.report_date - current.report_date).days) < 31
+    return (
+        previous.symbol == current.symbol
+        and previous.fiscal_date_ending == current.fiscal_date_ending
+    )
 
 
 def retain_rescheduled_events(
@@ -280,34 +287,47 @@ def retain_rescheduled_events(
     retained only through its original date and is labelled with the new date, so
     subscribers can see the revision without a separate notification event.
     """
+
+    # Put all current events into a dict keyed by a stable ID
     retained: dict[str, EarningsEvent] = {event_uid(event): event for event in events}
 
+    # loop through previous events to see if any of them are rescheduled to a new date
     for previous in previous_events:
         # no interest in events that have already passed
         if previous.report_date < today:
             continue
 
+        # matching current events are restricted to
+        # same symbol(corporation) and same fiscal quarter
+        # len usually wounldn't be 0, because report date >= today and this event must be in one of the current events
+        # len == 1 means this event captured previously, but need to check if the report date is still the same,
+        #       if not, then this is a reschedule notice
+        # len wouldn't be > 1, because the same corporation can't have multiple report dates for the same fiscal quarter
         matching_current = [
             event for event in events if same_reporting_period(previous, event)
         ]
+
+        # as discussed above, it shouldn't happen,
+        # just for the safety check
+        if not matching_current:
+            continue
+
         if any(event.report_date == previous.report_date for event in matching_current):
             # The provider still reports this date, so it is an active event, not
             # a revision notice.
             continue
 
-        """rescheduling logic"""
+        # previous event has rescheduled_to, meaning it has been retained already,
+        # retain it again with no special handling
         if previous.rescheduled_to:
-            # Carry a previous revision forward, updating its destination if the
-            # provider has moved the report date again.
-            destination = matching_current[0].report_date if matching_current else previous.rescheduled_to
-        elif matching_current:
-            destination = matching_current[0].report_date
-        else:
+            retained[event_uid(previous)] = previous
             continue
 
-        if abs((destination - previous.report_date).days) >= 31:
-            continue
+        # If logic come to here, means the previous event has been rescheduled to a new date,
+        # and the new date is in the current events
+        rescheduled_to = matching_current[0].report_date
 
+        # all of the fields copied from the previous event, except the rescheduled_to field, which is set to the new date
         retained[event_uid(previous)] = EarningsEvent(
             symbol=previous.symbol,
             name=previous.name,
@@ -315,7 +335,7 @@ def retain_rescheduled_events(
             fiscal_date_ending=previous.fiscal_date_ending,
             estimate=previous.estimate,
             currency=previous.currency,
-            rescheduled_to=destination,
+            rescheduled_to=rescheduled_to,
         )
 
     return sorted(retained.values(), key=lambda event: (event.report_date, event.symbol, event.rescheduled_to is not None))
@@ -362,8 +382,7 @@ def event_description(event: EarningsEvent) -> str:
         f"Symbol: {event.symbol}",
         f"Report date: {event.report_date.isoformat()}",
     ]
-    if event.fiscal_date_ending:
-        lines.append(f"Fiscal period ending: {event.fiscal_date_ending}")
+    lines.append(f"Fiscal period ending: {event.fiscal_date_ending}")
     if event.estimate:
         suffix = f" {event.currency}" if event.currency else ""
         lines.append(f"EPS estimate: {event.estimate}{suffix}")
