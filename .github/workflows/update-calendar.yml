@@ -1,11 +1,11 @@
 name: Update financial reports calendar
 
-# Run on demand from the Actions tab, and automatically on the first of each
-# month at 09:17 UTC.
+# Run on demand from the Actions tab, and automatically every Monday at
+# 09:17 UTC.
 on:
   workflow_dispatch:
   schedule:
-    - cron: "17 9 1 * *"
+    - cron: "17 9 * * 1"
 
 permissions:
   # Read repository files; publish the generated artifact to GitHub Pages;
