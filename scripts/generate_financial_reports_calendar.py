@@ -459,7 +459,9 @@ def main() -> int:
     args = parse_args()
     companies = read_watchlist(Path(args.watchlist))
     source_csv = read_source_csv(args)
+    # get current events
     events = parse_events(source_csv, companies)
+    # get previous events
     previous_events = read_previous_events(Path(args.previous_ics)) if args.previous_ics else []
     events = retain_rescheduled_events(events, previous_events, date.today())
     calendar = build_calendar(events, args.calendar_name)
