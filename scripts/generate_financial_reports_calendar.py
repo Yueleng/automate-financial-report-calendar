@@ -210,8 +210,11 @@ def unfold_ical_lines(contents: str) -> list[str]:
     """Unfold RFC 5545 continuation lines before reading an existing feed."""
     lines: list[str] = []
     for line in contents.splitlines():
+        # Lines beginning with a space or tab continue the previous logical line.
+        # Remove the continuation marker and join the content to that previous line.
         if line.startswith((" ", "\t")) and lines:
             lines[-1] += line[1:]
+        # Otherwise, begin a new logical line.
         else:
             lines.append(line)
     return lines
@@ -250,6 +253,9 @@ def read_previous_events(path: Path) -> list[EarningsEvent]:
             )
             symbol = description_fields.get("Symbol", "").upper()
             if report_date and fiscal_date_ending and symbol:
+                estimate_parts = description_fields.get("EPS estimate", "").split(maxsplit=1)
+                estimate = estimate_parts[0] if estimate_parts else ""
+                currency = estimate_parts[1] if len(estimate_parts) > 1 else ""
                 rescheduled_to = parse_date(event_fields.get("X-FINANCIAL-REPORT-RESCHEDULED-TO", ""))
                 events.append(
                     EarningsEvent(
@@ -257,18 +263,19 @@ def read_previous_events(path: Path) -> list[EarningsEvent]:
                         name=description_fields.get("Company", symbol),
                         report_date=report_date,
                         fiscal_date_ending=fiscal_date_ending.isoformat(),
-                        estimate=description_fields.get("EPS estimate", "").split(" ")[0],
+                        estimate=estimate,
+                        currency=currency,
                         rescheduled_to=rescheduled_to,
                     )
                 )
             event_fields = None
         elif event_fields is not None and ":" in line:
+            # Split only at the first colon because the field value may contain more colons.
             key, value = line.split(":", 1)
             # DTSTART;VALUE=DATE is not currently needed because the description
             # preserves the original date in a format shared by this generator.
             event_fields[key] = value
     return events
-
 
 def same_reporting_period(previous: EarningsEvent, current: EarningsEvent) -> bool:
     """Return whether two provider rows represent the same reporting quarter."""
@@ -299,7 +306,7 @@ def retain_rescheduled_events(
 
         # matching current events are restricted to
         # same symbol(corporation) and same fiscal quarter
-        # len usually wounldn't be 0, because report date >= today and this event must be in one of the current events
+        # len usually wounldn't be 0, because report date >= today and this previous event must match one of the current events
         # len == 1 means this event captured previously, but need to check if the report date is still the same,
         #       if not, then this is a reschedule notice
         # len wouldn't be > 1, because the same corporation can't have multiple report dates for the same fiscal quarter
