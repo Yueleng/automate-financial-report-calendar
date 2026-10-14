@@ -92,3 +92,47 @@ python3 scripts/generate_financial_reports_calendar.py --input-csv sample-alpha-
 The default source is Alpha Vantage's documented Earnings Calendar API. It returns expected company earnings in CSV format for the next 3, 6, or 12 months.
 
 Docs: <https://www.alphavantage.co/documentation/#earnings-calendar>
+
+---
+
+## Web Application (Next.js + FastAPI)
+
+In addition to the standalone CLI and GitHub Pages feed, this repository includes an interactive local web app:
+- **FastAPI backend** (`backend/`): Serves earnings data directly from an atomic CSV store (`backend/data/financial_reports.csv`) and manages scheduled Alpha Vantage syncs via APScheduler.
+- **Next.js frontend** (`frontend/`): Interactive FullCalendar earnings view, symbol chips filter, on-demand refresh button with rate-limit cooldown, and live watchlist management.
+
+### Quickstart
+
+1. **Install dependencies:**
+   ```bash
+   make setup
+   ```
+2. **Start the backend server** (defaults to `http://localhost:8000`):
+   ```bash
+   make backend
+   ```
+   *Note: APScheduler runs in-process, so use a single Uvicorn worker (e.g. `--reload` in dev).*
+
+3. **Start the frontend app** (in a separate terminal, defaults to `http://localhost:3000`):
+   ```bash
+   make frontend
+   ```
+
+4. **Run tests:**
+   ```bash
+   make test
+   ```
+
+### API Endpoints
+
+| Method | Path | Description |
+|---|---|---|
+| `GET` | `/api/health` | Liveness health check |
+| `GET` | `/api/reports?start=&end=&symbol=` | Filtered earnings events from the local CSV store |
+| `GET` | `/api/calendar.ics` | Subscription `.ics` feed generated from stored events |
+| `GET` | `/api/watchlist` | Get current tracked companies |
+| `POST` | `/api/watchlist` | Add company ticker → immediately re-filters local events |
+| `DELETE` | `/api/watchlist/{symbol}` | Remove company ticker → immediately re-filters |
+| `POST` | `/api/jobs/refresh` | Trigger background sync with Alpha Vantage (`202 Accepted`, `429` cooldown) |
+| `GET` | `/api/jobs/status` | Current background job status and countdowns |
+
