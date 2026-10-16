@@ -103,25 +103,66 @@ In addition to the standalone CLI and GitHub Pages feed, this repository include
 
 ### Quickstart
 
-1. **Install dependencies:**
-   ```bash
-   make setup
-   ```
-2. **Start the backend server** (defaults to `http://localhost:8000`):
-   ```bash
-   make backend
-   ```
-   *Note: APScheduler runs in-process, so use a single Uvicorn worker (e.g. `--reload` in dev).*
+#### 1. Setup & Environment
 
-3. **Start the frontend app** (in a separate terminal, defaults to `http://localhost:3000`):
-   ```bash
-   make frontend
-   ```
+Install dependencies for both backend and frontend:
+```bash
+make setup
+```
+> This creates a Python virtual environment in `backend/.venv`, installs backend dependencies, and runs `pnpm install` for the Next.js frontend.
 
-4. **Run tests:**
-   ```bash
-   make test
-   ```
+*(Optional)* If you plan to sync live earnings directly from Alpha Vantage, create a `.env` file in the repository root:
+```bash
+cp .env.example .env
+# Edit .env and insert your API key:
+# ALPHAVANTAGE_API_KEY="your_api_key_here"
+```
+
+---
+
+#### 2. Running the App (Two Terminals)
+
+Start the backend and frontend in separate terminal windows:
+
+##### Terminal 1: Backend (FastAPI)
+```bash
+make backend
+```
+*Or manually:*
+```bash
+cd backend && .venv/bin/uvicorn app.main:app --reload --port 8000
+```
+- **Backend URL:** [http://localhost:8000](http://localhost:8000)
+- **Interactive Swagger Docs:** [http://localhost:8000/docs](http://localhost:8000/docs)
+- **Health Check:** [http://localhost:8000/api/health](http://localhost:8000/api/health)
+
+> **Note:** The background sync scheduler runs in-process via APScheduler, so run with a single worker (e.g. `--reload` in dev).
+
+##### Terminal 2: Frontend (Next.js)
+```bash
+make frontend
+```
+*Or manually:*
+```bash
+cd frontend && pnpm dev
+```
+- **Web App UI:** [http://localhost:3000](http://localhost:3000)
+
+> **Note:** The frontend automatically reverse-proxies `/api/*` requests to the backend at `http://localhost:8000/api/*` via Next.js rewrites configured in `frontend/next.config.ts`.
+
+---
+
+#### 3. Running Tests
+
+Run the complete test suite across CLI core, FastAPI backend, and Next.js frontend:
+```bash
+make test
+```
+
+Or run test suites individually:
+- `make test-backend` — Backend unit & API router tests via `pytest`
+- `make test-frontend` — Frontend ESLint checks & production build validation
+- `make test-core` — Standalone calendar generator CLI tests
 
 ### API Endpoints
 
