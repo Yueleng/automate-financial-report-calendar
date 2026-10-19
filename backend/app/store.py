@@ -69,15 +69,15 @@ class ReportStore:
 
     # ----- earnings events (financial_reports.csv) -------------------------
 
-    # read events from financial_reports.csv
     def read_events(self) -> list[EarningsEvent]:
+        """Reads recently generated earnings events from financial_reports.csv."""
         path = self.settings.reports_csv
         if not path.exists():
             return []
         return events_from_csv(path.read_text(encoding="utf-8"))
 
-    # write events to financial_reports.csv
     def write_events(self, events: list[EarningsEvent]) -> None:
+        """Atomically writes events to financial_reports.csv."""
         with self.lock:
             atomic_write_text(self.settings.reports_csv, events_to_csv(events))
 
