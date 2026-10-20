@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import io
 import os
 import sys
 import textwrap
@@ -27,6 +28,27 @@ load_dotenv(PROJECT_ROOT / ".env")
 
 ALPHAVANTAGE_URL = "https://www.alphavantage.co/query"
 VALID_HORIZONS = {"3month", "6month", "12month"}
+
+# Column order of the CSV data store shared by the CLI (--output-csv) and the
+# FastAPI backend. rescheduled_to is blank for normal (active) events.
+REPORT_CSV_FIELDS = [
+    "symbol",
+    "name",
+    "report_date",
+    "fiscal_date_ending",
+    "estimate",
+    "currency",
+    "rescheduled_to",
+]
+
+
+class GeneratorError(RuntimeError):
+    """A user-facing failure (bad input, provider error).
+
+    Library code raises this instead of SystemExit so callers such as the
+    FastAPI background job can handle it like any other exception; main()
+    converts it into a non-zero exit code for the CLI.
+    """
 
 
 @dataclass(frozen=True)
@@ -83,6 +105,14 @@ def parse_args() -> argparse.Namespace:
             "there as reschedule notices until their original date passes."
         ),
     )
+    parser.add_argument(
+        "--output-csv",
+        help="Also write the resulting events to this CSV data-store file.",
+    )
+    parser.add_argument(
+        "--previous-csv",
+        help="Read previous events from a CSV data-store file (alternative to --previous-ics).",
+    )
     return parser.parse_args()
 
 
@@ -93,12 +123,12 @@ def read_watchlist(path: Path) -> dict[str, Company]:
     and letter case in either the watchlist or provider response.
     """
     if not path.exists():
-        raise SystemExit(f"Watchlist not found: {path}")
+        raise GeneratorError(f"Watchlist not found: {path}")
 
     with path.open(newline="", encoding="utf-8") as file:
         rows = csv.DictReader(file)
         if rows.fieldnames is None or "symbol" not in rows.fieldnames:
-            raise SystemExit("watchlist.csv must include a 'symbol' column.")
+            raise GeneratorError("watchlist.csv must include a 'symbol' column.")
 
         companies: dict[str, Company] = {}
         for row in rows:
@@ -109,7 +139,7 @@ def read_watchlist(path: Path) -> dict[str, Company]:
             companies[symbol] = Company(symbol=symbol, name=name)
 
     if not companies:
-        raise SystemExit("No symbols found in watchlist.")
+        raise GeneratorError("No symbols found in watchlist.")
     return companies
 
 
@@ -127,11 +157,11 @@ def fetch_alpha_vantage_csv(api_key: str, horizon: str) -> str:
         body = response.read().decode("utf-8-sig")
 
     if "Thank you for using Alpha Vantage" in body or "Our standard API rate limit" in body:
-        raise SystemExit("Alpha Vantage rate limit reached. Try again later.")
+        raise GeneratorError("Alpha Vantage rate limit reached. Try again later.")
     if "Invalid API call" in body:
-        raise SystemExit(f"Alpha Vantage returned an error:\n{body.strip()}")
+        raise GeneratorError(f"Alpha Vantage returned an error:\n{body.strip()}")
     if "symbol" not in body.lower():
-        raise SystemExit(f"Unexpected Alpha Vantage response:\n{body[:500].strip()}")
+        raise GeneratorError(f"Unexpected Alpha Vantage response:\n{body[:500].strip()}")
     return body
 
 
@@ -142,7 +172,7 @@ def read_source_csv(args: argparse.Namespace) -> str:
 
     api_key = os.environ.get("ALPHAVANTAGE_API_KEY", "").strip()
     if not api_key:
-        raise SystemExit(
+        raise GeneratorError(
             "Set ALPHAVANTAGE_API_KEY or pass --input-csv with an existing earnings CSV."
         )
     return fetch_alpha_vantage_csv(api_key, args.horizon)
@@ -175,7 +205,7 @@ def parse_events(csv_text: str, companies: dict[str, Company]) -> list[EarningsE
     """
     rows = csv.DictReader(csv_text.splitlines())
     if rows.fieldnames is None:
-        raise SystemExit("Source CSV is empty.")
+        raise GeneratorError("Source CSV is empty.")
 
     events: list[EarningsEvent] = []
     for row in rows:
@@ -348,6 +378,63 @@ def retain_rescheduled_events(
     return sorted(retained.values(), key=lambda event: (event.report_date, event.symbol, event.rescheduled_to is not None))
 
 
+def generate_events(
+    source_csv: str,
+    companies: dict[str, Company],
+    previous_events: Iterable[EarningsEvent],
+    today: date,
+) -> list[EarningsEvent]:
+    """Run the full event pipeline: filter provider rows, then retain revisions.
+
+    Shared by the CLI and the FastAPI backend so both apply identical rules.
+    """
+    events = parse_events(source_csv, companies)
+    return retain_rescheduled_events(events, previous_events, today)
+
+
+def events_to_csv(events: Iterable[EarningsEvent]) -> str:
+    """Serialize events into the CSV data-store format (REPORT_CSV_FIELDS)."""
+    buffer = io.StringIO()
+    writer = csv.DictWriter(buffer, fieldnames=REPORT_CSV_FIELDS, lineterminator="\n")
+    writer.writeheader()
+    for event in events:
+        writer.writerow(
+            {
+                "symbol": event.symbol,
+                "name": event.name,
+                "report_date": event.report_date.isoformat(),
+                "fiscal_date_ending": event.fiscal_date_ending,
+                "estimate": event.estimate,
+                "currency": event.currency,
+                "rescheduled_to": event.rescheduled_to.isoformat() if event.rescheduled_to else "",
+            }
+        )
+    return buffer.getvalue()
+
+
+def events_from_csv(csv_text: str) -> list[EarningsEvent]:
+    """Load events written by events_to_csv, skipping rows without valid dates."""
+    events: list[EarningsEvent] = []
+    for row in csv.DictReader(csv_text.splitlines()):
+        symbol = (row.get("symbol") or "").strip().upper()
+        report_date = parse_date(row.get("report_date") or "")
+        fiscal_date_ending = parse_date(row.get("fiscal_date_ending") or "")
+        if not symbol or report_date is None or fiscal_date_ending is None:
+            continue
+        events.append(
+            EarningsEvent(
+                symbol=symbol,
+                name=(row.get("name") or symbol).strip(),
+                report_date=report_date,
+                fiscal_date_ending=fiscal_date_ending.isoformat(),
+                estimate=(row.get("estimate") or "").strip(),
+                currency=(row.get("currency") or "").strip(),
+                rescheduled_to=parse_date(row.get("rescheduled_to") or ""),
+            )
+        )
+    return events
+
+
 def ical_escape(value: str) -> str:
     """Escape characters that have special meaning in iCalendar text fields."""
     return (
@@ -457,15 +544,27 @@ def write_calendar(path: Path, contents: str) -> None:
 def main() -> int:
     """Run the pipeline: watchlist -> source data -> events -> .ics file."""
     args = parse_args()
+    try:
+        return run(args)
+    except GeneratorError as error:
+        print(error, file=sys.stderr)
+        return 1
+
+
+def run(args: argparse.Namespace) -> int:
+    """Execute the CLI pipeline for already-parsed arguments."""
     companies = read_watchlist(Path(args.watchlist))
     source_csv = read_source_csv(args)
-    # get current events
-    events = parse_events(source_csv, companies)
     # get previous events
     previous_events = read_previous_events(Path(args.previous_ics)) if args.previous_ics else []
-    events = retain_rescheduled_events(events, previous_events, date.today())
+    if args.previous_csv and Path(args.previous_csv).exists():
+        previous_events += events_from_csv(Path(args.previous_csv).read_text(encoding="utf-8"))
+    # get current events, retaining revised dates from the previous events
+    events = generate_events(source_csv, companies, previous_events, date.today())
     calendar = build_calendar(events, args.calendar_name)
     write_calendar(Path(args.output), calendar)
+    if args.output_csv:
+        write_calendar(Path(args.output_csv), events_to_csv(events))
 
     # Report coverage so a successful run does not hide missing provider dates.
     matched_symbols = sorted({event.symbol for event in events})
