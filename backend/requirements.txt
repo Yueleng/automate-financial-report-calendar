@@ -2,3 +2,6 @@ fastapi[standard]>=0.115
 apscheduler>=3.10,<4
 python-dotenv>=1.0,<2.0
 pytest>=8
+sqlalchemy>=2.0,<3
+alembic>=1.13
+psycopg[binary]>=3.1
