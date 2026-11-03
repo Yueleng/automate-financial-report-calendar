@@ -1,3 +1,5 @@
+> **Superseded:** this describes the original CSV-based design. See README.md for the current Postgres-based architecture.
+
 # Financial Reports App — Next.js + FastAPI
 
 Turn the existing single-script `.ics` generator into a small local web app:
