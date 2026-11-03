@@ -20,14 +20,17 @@ class WatchlistRepo:
         self.session = session
 
     def read(self) -> dict[str, Company]:
+        """Read all watchlist items and return as a dict of symbol -> Company."""
         rows = self.session.scalars(select(WatchlistItem).order_by(WatchlistItem.symbol))
         return {r.symbol: Company(symbol=r.symbol, name=r.name) for r in rows}
 
     def add(self, company: Company) -> None:
+        """Add a company to the watchlist"""
         self.session.add(WatchlistItem(symbol=company.symbol, name=company.name))
         self.session.flush()
 
     def remove(self, symbol: str) -> None:
+        """Remove a company from the watchlist by symbol"""
         self.session.execute(delete(WatchlistItem).where(WatchlistItem.symbol == symbol))
 
     def replace(self, companies: list[Company]) -> None:
@@ -43,6 +46,7 @@ class WatchlistRepo:
         self.session.flush()
 
     def upsert_many(self, companies: list[Company]) -> None:
+        """Make the table union of the existing companies and the given companies"""
         existing = {r.symbol: r for r in self.session.scalars(select(WatchlistItem))}
         for company in companies:
             if company.symbol in existing:
@@ -132,6 +136,7 @@ class EventRepo:
         stored = self.session.scalars(
             select(EarningsEventRow).where(EarningsEventRow.symbol.in_({s for s, _ in current_dates}))
         )
+        # Detect superseded date and mark the old event if it was rescheduled
         for row in stored:
             key = (row.symbol, row.fiscal_date_ending)
             if key not in current_dates or (*key, row.report_date) in active_dates:
