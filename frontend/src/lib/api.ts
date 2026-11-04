@@ -7,6 +7,9 @@ export interface Report {
   estimate: string;
   currency: string;
   rescheduled_to: string | null;
+  status: "active" | "rescheduled";
+  first_seen_at: string | null;
+  last_seen_at: string | null;
 }
 
 export interface ReportsResponse {
