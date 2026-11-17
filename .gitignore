@@ -34,11 +34,8 @@ pip-wheel-metadata/
 .idea/
 .DS_Store
 
-# App backend data store
-backend/data/
 
 # Frontend dependencies and build outputs
 frontend/node_modules/
 frontend/.next/
 frontend/.env*.local
-
