@@ -1,6 +1,7 @@
 """FastAPI application entrypoint.
 
-Run with a single worker (the refresh scheduler lives in-process)::
+Needs Postgres (DATABASE_URL). The in-process scheduler runs once per worker,
+but the advisory lock in jobs.py makes overlapping runs skip safely::
 
     uvicorn app.main:app --reload --port 8000
 """
@@ -16,16 +17,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import Settings
 from .jobs import Fetcher, RefreshService
 from .routers import jobs, reports, watchlist
-from .store import ReportStore
+from .db import make_engine, make_session_factory
 
 
 def create_app(settings: Settings | None = None, fetcher: Fetcher | None = None) -> FastAPI:
     # Called directly on the class
     settings = settings or Settings.from_env()
-    # instantiate ReportStore with settings
-    store = ReportStore(settings)
-    # instantiate RefreshService with settings and store
-    refresh = RefreshService(settings, store, fetcher=fetcher)
+    engine = make_engine(settings.database_url)
+    session_factory = make_session_factory(engine)
+    refresh = RefreshService(settings, engine, session_factory, fetcher=fetcher)
 
     # @asynccontextmanager - Context manager for managing the application lifecycle.
     # lifespan is called automatically when the application starts and stops.
@@ -38,10 +38,12 @@ def create_app(settings: Settings | None = None, fetcher: Fetcher | None = None)
             yield
         finally:
             refresh.shutdown_scheduler()
+            engine.dispose()
 
     app = FastAPI(title="Financial Reports API", version="1.0.0", lifespan=lifespan)
     app.state.settings = settings
-    app.state.store = store
+    app.state.engine = engine
+    app.state.session_factory = session_factory
     app.state.refresh = refresh
 
     app.add_middleware(

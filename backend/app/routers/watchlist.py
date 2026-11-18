@@ -1,64 +1,58 @@
-"""Watchlist CRUD; every change re-filters events from the cached raw CSV."""
+"""Watchlist CRUD (Postgres); every change re-syncs events from the cached raw snapshot."""
 
 from __future__ import annotations
 
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
 
-from ..core import Company
-from ..deps import get_refresh, get_store
-from ..jobs import RefreshService
+from ..db import get_session
+from ..domain import Company
+from ..jobs import refilter
+from ..repositories import WatchlistRepo
 from ..schemas import WatchlistItem, WatchlistResponse
-from ..store import ReportStore
 
 router = APIRouter(prefix="/watchlist", tags=["watchlist"])
 
-Store = Annotated[ReportStore, Depends(get_store)]
-Refresh = Annotated[RefreshService, Depends(get_refresh)]
+DbSession = Annotated[Session, Depends(get_session)]
 
 
-def _items(store: ReportStore) -> list[WatchlistItem]:
-    return [WatchlistItem(symbol=c.symbol, name=c.name) for c in store.read_watchlist().values()]
-
-
-def _save(store: ReportStore, refresh: RefreshService, companies: list[Company]) -> WatchlistResponse:
-    if not companies:
-        raise HTTPException(status.HTTP_400_BAD_REQUEST, "The watchlist must keep at least one symbol.")
-    with store.lock:
-        store.write_watchlist(companies)
-        refiltered = refresh.refilter()
-    return WatchlistResponse(items=_items(store), refiltered=refiltered)
+def _items(repo: WatchlistRepo) -> list[WatchlistItem]:
+    return [WatchlistItem(symbol=c.symbol, name=c.name) for c in repo.read().values()]
 
 
 @router.get("", response_model=WatchlistResponse)
-def get_watchlist(store: Store) -> WatchlistResponse:
-    return WatchlistResponse(items=_items(store))
+def get_watchlist(session: DbSession) -> WatchlistResponse:
+    return WatchlistResponse(items=_items(WatchlistRepo(session)))
 
 
 @router.post("", response_model=WatchlistResponse, status_code=status.HTTP_201_CREATED)
-def add_symbol(item: WatchlistItem, store: Store, refresh: Refresh) -> WatchlistResponse:
-    with store.lock:
-        companies = store.read_watchlist()
-        if item.symbol in companies:
-            raise HTTPException(status.HTTP_409_CONFLICT, f"{item.symbol} is already on the watchlist.")
-        updated = [*companies.values(), Company(symbol=item.symbol, name=item.name or item.symbol)]
-        return _save(store, refresh, updated)
+def add_symbol(item: WatchlistItem, session: DbSession) -> WatchlistResponse:
+    repo = WatchlistRepo(session)
+    if item.symbol in repo.read():
+        raise HTTPException(status.HTTP_409_CONFLICT, f"{item.symbol} is already on the watchlist.")
+    repo.add(Company(symbol=item.symbol, name=item.name or item.symbol))
+    return WatchlistResponse(items=_items(repo), refiltered=refilter(session))
 
 
 @router.put("", response_model=WatchlistResponse)
-def replace_watchlist(items: list[WatchlistItem], store: Store, refresh: Refresh) -> WatchlistResponse:
+def replace_watchlist(items: list[WatchlistItem], session: DbSession) -> WatchlistResponse:
+    if not items:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "Watchlist must contain at least one symbol.")
     unique: dict[str, Company] = {}
     for item in items:
         unique[item.symbol] = Company(symbol=item.symbol, name=item.name or item.symbol)
-    return _save(store, refresh, list(unique.values()))
+    repo = WatchlistRepo(session)
+    repo.replace(list(unique.values()))
+    return WatchlistResponse(items=_items(repo), refiltered=refilter(session))
 
 
 @router.delete("/{symbol}", response_model=WatchlistResponse)
-def remove_symbol(symbol: str, store: Store, refresh: Refresh) -> WatchlistResponse:
+def remove_symbol(symbol: str, session: DbSession) -> WatchlistResponse:
     symbol = symbol.strip().upper()
-    with store.lock:
-        companies = store.read_watchlist()
-        if symbol not in companies:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"{symbol} is not on the watchlist.")
-        return _save(store, refresh, [c for s, c in companies.items() if s != symbol])
+    repo = WatchlistRepo(session)
+    if symbol not in repo.read():
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"{symbol} is not on the watchlist.")
+    repo.remove(symbol)
+    return WatchlistResponse(items=_items(repo), refiltered=refilter(session))

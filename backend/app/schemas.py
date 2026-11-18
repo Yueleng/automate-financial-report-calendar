@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, field_validator
 
 
@@ -16,6 +18,9 @@ class Report(BaseModel):
     estimate: str
     currency: str
     rescheduled_to: date | None = None
+    status: Literal["active", "rescheduled"] = "active"
+    first_seen_at: datetime | None = None
+    last_seen_at: datetime | None = None
 
 
 class ReportsResponse(BaseModel):

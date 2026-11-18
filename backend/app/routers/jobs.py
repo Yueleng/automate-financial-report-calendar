@@ -28,7 +28,7 @@ Refresh = Annotated[RefreshService, Depends(get_refresh)]
 
 # Translate internal domain state into the API Schema
 def _status(refresh: RefreshService) -> JobStatusResponse:
-    s = refresh.status
+    s = refresh.get_status()
     return JobStatusResponse(
         running=s.running,
         trigger=s.trigger,
@@ -40,7 +40,7 @@ def _status(refresh: RefreshService) -> JobStatusResponse:
         missing_symbols=s.missing_symbols,
         next_run_at=refresh.next_run_at(),
         cooldown_until=refresh.cooldown_until(),
-        updated_at=refresh.store.updated_at(),
+        updated_at=s.last_success_at,
     )
 
 # Read-only status endpoint

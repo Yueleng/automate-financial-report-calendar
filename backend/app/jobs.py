@@ -1,33 +1,37 @@
 """
-The refresh job: Alpha Vantage -> CSV store, plus its schedule and status.
+The refresh job: Alpha Vantage -> Postgres, plus its schedule and status.
 
-It is the heart of the background processing pipeline. It manages
-few tasks:
-- fetching raw financial earnings data from Alpha Vantage,
-- parsing and generating calendar events for tracked companies,
-- enforcing rate limiting and thread safety, and
-- orchestrating APScheduler cron jobs.
+- fetches raw earnings data from Alpha Vantage (outside any DB transaction),
+- stores the raw snapshot and upserts the watchlist's events (never deleting),
+- enforces cooldown and single-run semantics with a Postgres advisory lock
+  (so it holds across workers), and
+- orchestrates the APScheduler cron job.
 """
-
 
 from __future__ import annotations
 
 import logging
-import threading
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import Connection, Engine, text
+from sqlalchemy.orm import Session, sessionmaker
 
 from .config import Settings
-from .core import EarningsEvent, GeneratorError, fetch_alpha_vantage_csv, generate_events
-from .store import ReportStore
+from .domain import GeneratorError, fetch_alpha_vantage_csv, parse_events
+from .models import JobRun
+from .repositories import EventRepo, JobRepo, SnapshotRepo, WatchlistRepo, utcnow
 
 logger = logging.getLogger(__name__)
 
 Fetcher = Callable[[str, str], str]
+
+# Arbitrary app-wide key for pg_try_advisory_lock.
+ADVISORY_LOCK_KEY = 726_001
+
 
 # Raised when an operation attempts to start a job while one is already running.
 class RefreshInProgress(Exception):
@@ -41,7 +45,7 @@ class RefreshCooldown(Exception):
         super().__init__(f"Refresh is cooling down; retry in {retry_after}s.")
         self.retry_after = retry_after
 
-# In-memory dataclass tracking execution health, timestamps, errors, and
+# Dataclass summarising execution health (derived from job_runs), timestamps, errors, and
 # symbol match statistics (which tracked symbols had upcoming earnings
 # vs. which had none).
 @dataclass
@@ -55,82 +59,134 @@ class JobStatus:
     matched_symbols: list[str] = field(default_factory=list)
     missing_symbols: list[str] = field(default_factory=list)
 
-#                     ┌───────────────────────────┐
-#                     │ APScheduler (cron/startup)│
-#                     └─────────────┬─────────────┘
-#                                   │
-# ┌──────────────────┐              │
-# │  FastAPI Router  │──────────────┼──────────────► [RefreshService]
-# │ (manual trigger) │              │                      │
-# └──────────────────┘              ▼                      ▼
-#                            try_begin() / lock     _refresh() / refilter()
-#                                                          │
-#                                   ┌──────────────────────┴──────────────────────┐
-#                                   ▼                                             ▼
-#                         Alpha Vantage Fetcher                           ReportStore & core.py
-#                         (network outside lock)                         (event rebuild & CSV store)
+#                ┌───────────────────────────┐
+#                │ APScheduler (cron/startup)│
+#                └─────────────┬─────────────┘
+#                              │
+# ┌──────────────────┐         │
+# │  FastAPI Router  │─────────┴─────────► [RefreshService]
+# │ (manual trigger) │                            │
+# └──────────────────┘                            ▼
+#                                    try_begin() / advisory lock
+#                                      (pg_try_advisory_lock)
+#                                                 │
+#                                                 ▼
+#                                             _refresh()
+#                                                 │
+#                                  ┌──────────────┴──────────────┐
+#                                  ▼                             ▼
+#                        Alpha Vantage Fetcher             DB Transaction
+#                        (HTTP outside DB tx)           (SnapshotRepo.save)
+#                                                                │
+# ┌──────────────────┐                                           │
+# │ Watchlist Router │─────────── refilter() ─────────────────►┌─┴─────────────────┐
+# │   (mutations)    │        (cached snapshot,                │  sync_from_raw()  │
+# └──────────────────┘         no network I/O)                 │ (WatchlistRepo &  │
+#                                                              │  EventRepo.sync)  │
+#                                                              └─────────┬─────────┘
+#                                                                        │
+#                                                                        ▼
+#                                                                Postgres Database
+#                                                            (snapshots, events, jobs)
 
 
+def sync_from_raw(session: Session, raw: str) -> tuple[int, list[str], list[str]]:
+    """Upsert events for the current watchlist from a raw provider CSV.
+
+    Returns (event_count, matched_symbols, missing_symbols).
+    """
+    companies = WatchlistRepo(session).read()
+    parsed = parse_events(raw, companies)
+    EventRepo(session).sync(parsed)
+    matched = sorted({event.symbol for event in parsed})
+    return len(parsed), matched, sorted(set(companies) - set(matched))
+
+
+def refilter(session: Session) -> bool:
+    """Re-sync events for the current watchlist from the cached raw snapshot.
+
+    Used after watchlist edits so no Alpha Vantage call is needed. Returns False when
+    no snapshot exists yet (new symbols then appear only after a refresh).
+    """
+    raw = SnapshotRepo(session).latest()
+    if raw is None:
+        return False
+    sync_from_raw(session, raw)
+    return True
 
 class RefreshService:
     def __init__(
         self,
         settings: Settings,
-        store: ReportStore,
+        engine: Engine,
+        session_factory: sessionmaker[Session],
         fetcher: Fetcher | None = None,
-        today: Callable[[], date] = date.today,
     ) -> None:
         self.settings = settings
-        self.store = store
+        self.engine = engine
+        self.session_factory = session_factory
         self.fetcher = fetcher or fetch_alpha_vantage_csv
-        self.today = today
-        self.status = JobStatus()
-        # Held for the whole duration of a refresh; acquired non-blocking so a
-        # second trigger is rejected (manual) or skipped (cron) instead of queued.
-        self._run_lock = threading.Lock()
+        self._lock_conn: Connection | None = None
+        self._run_id: int | None = None
         self.scheduler: BackgroundScheduler | None = None
+
+    # ----- status ----------------------------------------------------------
+
+    def get_status(self) -> JobStatus:
+        """Derive status from the persisted job runs (survives restarts)."""
+        with self.session_factory() as session:
+            jobs = JobRepo(session)
+            latest = jobs.latest()
+            success = jobs.last_success()
+            if latest is None:
+                return JobStatus()
+            return JobStatus(
+                running=latest.finished_at is None,
+                trigger=latest.trigger,
+                last_run_at=latest.started_at,
+                last_success_at=success.finished_at if success else None,
+                last_error=latest.error if latest.success is False else None,
+                event_count=success.event_count if success else None,
+                matched_symbols=list(success.matched_symbols) if success else [],
+                missing_symbols=list(success.missing_symbols) if success else [],
+            )
 
     # ----- triggering ------------------------------------------------------
 
     def try_begin(self, trigger: str, enforce_cooldown: bool) -> None:
-        """
-        Claim the run slot or raise; call ``run_claimed`` afterwards.
-        
-        Args:
-            trigger: ``cron`` or user-triggered (``manual``).
-            enforce_cooldown: when true, skip if less than ``settings.refresh_cooldown_seconds``
-                              have passed since last run. Respects only for manual runs
-                              to allow back-to-back cron runs.
-                              
+        """Claim the run slot or raise; call run_claimed afterwards.
+
         Raises:
-            RefreshCooldown: if ``enforce_cooldown`` and not enough time has passed.
-            RefreshInProgress: if another refresh is already running (for ``manual``).
+            RefreshCooldown: if enforce_cooldown and the last run was too recent.
+            RefreshInProgress: if another refresh (any process) holds the advisory lock.
         """
-        if enforce_cooldown and self.status.last_run_at is not None:
-            elapsed = datetime.now(timezone.utc) - self.status.last_run_at
-            remaining = self.settings.refresh_cooldown_seconds - int(elapsed.total_seconds())
+        if enforce_cooldown:
+            remaining = self._cooldown_remaining()
             if remaining > 0:
                 raise RefreshCooldown(remaining)
-        # Non-blocking lock acquisition (acquire(blocking=False)): Immediately raises 
-        # ``RefreshInProgress`` rather than waiting in a queue or creating race conditions.
-        if not self._run_lock.acquire(blocking=False):
+        conn = self.engine.connect()
+        if not conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": ADVISORY_LOCK_KEY}).scalar():
+            conn.close()
             raise RefreshInProgress()
-        self.status.running = True
-        self.status.trigger = trigger
-        self.status.last_run_at = datetime.now(timezone.utc)
+        self._lock_conn = conn
+        with self.session_factory() as session:
+            self._run_id = JobRepo(session).start(trigger).id
+            session.commit()
 
     def run_claimed(self) -> None:
-        """Execute a refresh whose slot was claimed with ``try_begin``."""
+        """Execute a refresh whose slot was claimed with try_begin."""
+        error: str | None = None
+        result: tuple[int, list[str], list[str]] | None = None
         try:
-            self._refresh()
-            self.status.last_success_at = datetime.now(timezone.utc)
-            self.status.last_error = None
-        except Exception as error:  # noqa: BLE001 - surface any failure in status
+            result = self._refresh()
+        except Exception as exc:  # noqa: BLE001 - surface any failure in status
             logger.exception("Financial reports refresh failed")
-            self.status.last_error = str(error) or error.__class__.__name__
+            error = str(exc) or exc.__class__.__name__
         finally:
-            self.status.running = False
-            self._run_lock.release()
+            try:
+                self._finish(error, result)
+            finally:
+                self._release()
 
     def run_if_idle(self, trigger: str = "cron") -> None:
         """Entry point for scheduled runs: silently skip if one is already running."""
@@ -141,62 +197,46 @@ class RefreshService:
             return
         self.run_claimed()
 
+    def _finish(self, error: str | None, result: tuple[int, list[str], list[str]] | None) -> None:
+        with self.session_factory() as session:
+            run = session.get(JobRun, self._run_id)
+            if run is not None:
+                run.finished_at = utcnow()
+                run.success = error is None
+                run.error = error
+                if result is not None:
+                    run.event_count, run.matched_symbols, run.missing_symbols = result
+            session.commit()
+
+    def _release(self) -> None:
+        conn, self._lock_conn, self._run_id = self._lock_conn, None, None
+        if conn is not None:
+            try:
+                conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": ADVISORY_LOCK_KEY})
+            finally:
+                conn.close()
+
+    def _cooldown_remaining(self) -> int:
+        with self.session_factory() as session:
+            latest = JobRepo(session).latest()
+        if latest is None:
+            return 0
+        elapsed = datetime.now(timezone.utc) - latest.started_at
+        return self.settings.refresh_cooldown_seconds - int(elapsed.total_seconds())
+
     # ----- work ------------------------------------------------------------
 
-    def _refresh(self) -> None:
-        """
-        Optimized Locking Strategy: The slow HTTP network call to Alpha Vantage 
-        occurs outside self.store.lock. The store lock is only acquired during the 
-        sub-millisecond file write and parsing phases. This guarantees that user 
-        queries to GET /reports or GET /watchlist are not blocked while waiting 
-        for external API responses.
-        """
+    def _refresh(self) -> tuple[int, list[str], list[str]]:
+        """Fetch (no transaction open), then store snapshot + events in one transaction."""
         api_key = self.settings.alphavantage_api_key
         if not api_key:
             raise GeneratorError("ALPHAVANTAGE_API_KEY is not configured.")
-        # Network I/O happens outside the store lock so reads stay fast.
         raw = self.fetcher(api_key, self.settings.refresh_horizon)
-        with self.store.lock:
-            self.store.write_raw(raw)
-            self._rebuild_from(raw)
-
-    def refilter(self) -> bool:
-        """Rebuild events for the current watchlist from the cached raw CSV.
-        Used when the watchlist changes (e.g., adding or removing a stock ticker)
-
-        Returns False when no cache exists yet; events of removed symbols are
-        still dropped, but newly added symbols appear only after a refresh.
-
-        If a raw provider CSV is cached on disk, it re-evaluates the events
-        against the new watchlist without burning Alpha Vantage API call limits.
-
-        If no raw cache exists yet, it purges removed symbols from existing events.
-        """
-        with self.store.lock:
-            raw = self.store.read_raw()
-            if raw is not None:
-                self._rebuild_from(raw)
-                return True
-            symbols = set(self.store.read_watchlist())
-            self.store.write_events([e for e in self.store.read_events() if e.symbol in symbols])
-            return False
-
-    def _rebuild_from(self, raw: str) -> list[EarningsEvent]:
-        companies = self.store.read_watchlist()
-        # The previous CSV plays the role the published .ics plays for the CLI:
-        # it lets revised report dates be retained as reschedule notices.
-        previous = self.store.read_events()
-        # Passes the raw CSV, company watchlist, and previous events into the generator.
-        # to detect date revisions and remove already-occurred events.
-        events = generate_events(raw, companies, previous, self.today())
-        # Writes the new events list into financial_reports.csv.
-        self.store.write_events(events)
-        # Calculate matched and missing symbols for status reporting.
-        matched = sorted({event.symbol for event in events})
-        self.status.event_count = len(events)
-        self.status.matched_symbols = matched
-        self.status.missing_symbols = sorted(set(companies) - set(matched))
-        return events
+        with self.session_factory() as session:
+            SnapshotRepo(session).save(raw, self.settings.refresh_horizon)
+            result = sync_from_raw(session, raw)
+            session.commit()
+        return result
 
     # ----- schedule --------------------------------------------------------
 
@@ -211,10 +251,10 @@ class RefreshService:
             coalesce=True,
             misfire_grace_time=3600,
         )
-        if not self.settings.reports_csv.exists() and self.settings.alphavantage_api_key:
+        if self.settings.alphavantage_api_key and not self._has_events():
             """
-            First start: populate the CSV right away instead of waiting for cron.
-            If the server starts and reports.csv does not exist yet (but an API key is provided),
+            First start: populate the database right away instead of waiting for cron.
+            If the server starts and no events are stored yet (but an API key is provided),
             it schedules a one-off run (id="initial-refresh") 1 second in the future to seed data immediately.
             """
             scheduler.add_job(
@@ -242,7 +282,13 @@ class RefreshService:
 
     def cooldown_until(self) -> datetime | None:
         """Returns the time until which refreshes are rate-limited."""
-        if self.status.last_run_at is None:
+        with self.session_factory() as session:
+            latest = JobRepo(session).latest()
+        if latest is None:
             return None
-        until = self.status.last_run_at + timedelta(seconds=self.settings.refresh_cooldown_seconds)
+        until = latest.started_at + timedelta(seconds=self.settings.refresh_cooldown_seconds)
         return until if until > datetime.now(timezone.utc) else None
+
+    def _has_events(self) -> bool:
+        with self.session_factory() as session:
+            return JobRepo(session).has_events()

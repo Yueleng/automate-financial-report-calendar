@@ -31,6 +31,9 @@ PROJECT_ROOT = BACKEND_ROOT.parent
 load_dotenv(PROJECT_ROOT / ".env")
 
 
+DEFAULT_DATABASE_URL = "postgresql+psycopg://fin:fin@localhost:5433/fin"
+
+
 def _env(name: str, default: str) -> str:
     """
     Helper function to get environment variables with support
@@ -49,10 +52,8 @@ def _env(name: str, default: str) -> str:
 class Settings:
     # Alpha Vantage API key
     alphavantage_api_key: str = ""
-    # Path to watchlist.csv
-    watchlist_path: Path = PROJECT_ROOT / "watchlist.csv"
-    # Directory for earnings data files
-    data_dir: Path = BACKEND_ROOT / "data"
+    # SQLAlchemy URL of the Postgres database
+    database_url: str = DEFAULT_DATABASE_URL
     # Standard 5-field crontab
     refresh_cron: str = "0 6 * * *"
     # Timezone for cron evaluation
@@ -68,19 +69,6 @@ class Settings:
     # Tests disable the background scheduler so no real network call happens.
     scheduler_enabled: bool = True
 
-    # @property turns a method into a getter so you can access it like a regular
-    # variable without parentheses (), but it computes its value dynamically on access
-    # read-only properties (can't be set like ``settings.reports_csv = ...``)
-    @property
-    def reports_csv(self) -> Path:
-        """Filtered watchlist events served by the API."""
-        return self.data_dir / "financial_reports.csv"
-
-    @property
-    def raw_csv(self) -> Path:
-        """Last full Alpha Vantage response, cached so watchlist edits need no API call."""
-        return self.data_dir / "earnings_raw.csv"
-
     # @classmethod - Binds the method to the class itself, rather than to a specific
     # instance (self). The first parameter passed is cls (the class itself, e.g., Settings),
     # not self.
@@ -90,8 +78,7 @@ class Settings:
     def from_env(cls) -> "Settings":
         return cls(
             alphavantage_api_key=_env("ALPHAVANTAGE_API_KEY", ""),
-            watchlist_path=Path(_env("WATCHLIST_PATH", str(PROJECT_ROOT / "watchlist.csv"))),
-            data_dir=Path(_env("DATA_DIR", str(BACKEND_ROOT / "data"))),
+            database_url=_env("DATABASE_URL", DEFAULT_DATABASE_URL),
             refresh_cron=_env("REFRESH_CRON", "0 6 * * *"),
             refresh_tz=_env("REFRESH_TZ", "America/Toronto"),
             refresh_horizon=_env("REFRESH_HORIZON", "12month"),
