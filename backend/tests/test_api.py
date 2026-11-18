@@ -1,9 +1,7 @@
-"""API tests: no network, temp CSV files, injectable Alpha Vantage fetcher."""
+"""API tests: real Postgres (see conftest.py), injectable Alpha Vantage fetcher, no network."""
 
 from __future__ import annotations
 
-from datetime import date
-from pathlib import Path
 from typing import cast
 
 import pytest
@@ -40,19 +38,25 @@ class FakeFetcher:
         return self.bodies.pop(0) if len(self.bodies) > 1 else self.bodies[0]
 
 
-def make_client(tmp_path: Path, fetcher: Fetcher, cooldown: int = 0) -> TestClient:
-    watchlist = tmp_path / "watchlist.csv"
-    watchlist.write_text("symbol,name\nNVDA,NVIDIA\nMSFT,Microsoft\n", encoding="utf-8")
-    settings = Settings(
+def make_settings(database_url: str, cooldown: int = 0) -> Settings:
+    return Settings(
         alphavantage_api_key="test-key",
-        watchlist_path=watchlist,
-        data_dir=tmp_path / "data",
+        database_url=database_url,
         refresh_cooldown_seconds=cooldown,
         scheduler_enabled=False,
     )
-    app = create_app(settings, fetcher=fetcher)
-    app.state.refresh.today = lambda: date(2026, 10, 1)
-    return TestClient(app)
+
+
+def make_client(database_url: str, fetcher: Fetcher, cooldown: int = 0, watchlist: bool = True) -> TestClient:
+    app = create_app(make_settings(database_url, cooldown), fetcher=fetcher)
+    client = TestClient(app)
+    if watchlist:
+        response = client.put(
+            "/api/watchlist",
+            json=[{"symbol": "NVDA", "name": "NVIDIA"}, {"symbol": "MSFT", "name": "Microsoft"}],
+        )
+        assert response.status_code == 200
+    return client
 
 
 @pytest.fixture
@@ -60,14 +64,14 @@ def fetcher() -> FakeFetcher:
     return FakeFetcher(RAW_V1, RAW_V2)
 
 
-def test_reports_empty_before_first_refresh(tmp_path: Path, fetcher: FakeFetcher) -> None:
-    client = make_client(tmp_path, fetcher)
+def test_reports_empty_before_first_refresh(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher)
     body = client.get("/api/reports").json()
     assert body == {"updated_at": None, "reports": []}
 
 
-def test_refresh_writes_csv_and_serves_watchlist_events(tmp_path: Path, fetcher: FakeFetcher) -> None:
-    client = make_client(tmp_path, fetcher)
+def test_refresh_stores_and_serves_watchlist_events(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher)
     response = client.post("/api/jobs/refresh")
     assert response.status_code == 202
 
@@ -75,8 +79,6 @@ def test_refresh_writes_csv_and_serves_watchlist_events(tmp_path: Path, fetcher:
     assert status["running"] is False
     assert status["last_error"] is None
     assert status["event_count"] == 2
-    assert (tmp_path / "data" / "financial_reports.csv").exists()
-    assert (tmp_path / "data" / "earnings_raw.csv").exists()
 
     body = client.get("/api/reports").json()
     assert body["updated_at"] is not None
@@ -88,8 +90,8 @@ def test_refresh_writes_csv_and_serves_watchlist_events(tmp_path: Path, fetcher:
     assert body["reports"][1]["name"] == "NVIDIA"
 
 
-def test_reports_filters(tmp_path: Path, fetcher: FakeFetcher) -> None:
-    client = make_client(tmp_path, fetcher)
+def test_reports_filters(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher)
     client.post("/api/jobs/refresh")
     by_symbol = client.get("/api/reports", params={"symbol": "nvda"}).json()["reports"]
     assert [r["symbol"] for r in by_symbol] == ["NVDA"]
@@ -97,8 +99,8 @@ def test_reports_filters(tmp_path: Path, fetcher: FakeFetcher) -> None:
     assert [r["symbol"] for r in by_range["reports"]] == ["NVDA"]
 
 
-def test_reschedule_is_retained_via_csv_across_refreshes(tmp_path: Path, fetcher: FakeFetcher) -> None:
-    client = make_client(tmp_path, fetcher)
+def test_reschedule_is_retained_across_refreshes(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher)
     client.post("/api/jobs/refresh")
     client.post("/api/jobs/refresh")
 
@@ -110,8 +112,8 @@ def test_reschedule_is_retained_via_csv_across_refreshes(tmp_path: Path, fetcher
     assert "rescheduled to Oct 29" in client.get("/api/calendar.ics").text
 
 
-def test_calendar_ics(tmp_path: Path, fetcher: FakeFetcher) -> None:
-    client = make_client(tmp_path, fetcher)
+def test_calendar_ics(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher)
     client.post("/api/jobs/refresh")
     response = client.get("/api/calendar.ics")
     assert response.status_code == 200
@@ -119,8 +121,8 @@ def test_calendar_ics(tmp_path: Path, fetcher: FakeFetcher) -> None:
     assert response.text.count("BEGIN:VEVENT") == 2
 
 
-def test_refresh_cooldown_returns_429(tmp_path: Path, fetcher: FakeFetcher) -> None:
-    client = make_client(tmp_path, fetcher, cooldown=300)
+def test_refresh_cooldown_returns_429(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher, cooldown=300)
     assert client.post("/api/jobs/refresh").status_code == 202
     second = client.post("/api/jobs/refresh")
     assert second.status_code == 429
@@ -128,8 +130,8 @@ def test_refresh_cooldown_returns_429(tmp_path: Path, fetcher: FakeFetcher) -> N
     assert fetcher.calls == 1
 
 
-def test_refresh_while_running_returns_409(tmp_path: Path, fetcher: FakeFetcher) -> None:
-    client = make_client(tmp_path, fetcher)
+def test_refresh_while_running_returns_409(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher)
     app = cast(FastAPI, client.app)
     refresh = app.state.refresh
     refresh.try_begin("test", enforce_cooldown=False)
@@ -139,19 +141,19 @@ def test_refresh_while_running_returns_409(tmp_path: Path, fetcher: FakeFetcher)
         refresh.run_claimed()
 
 
-def test_refresh_failure_is_reported(tmp_path: Path) -> None:
+def test_refresh_failure_is_reported(database_url: str) -> None:
     def failing(api_key: str, horizon: str) -> str:
         raise RuntimeError("provider down")
 
-    client = make_client(tmp_path, failing)
+    client = make_client(database_url, failing)
     client.post("/api/jobs/refresh")
     status = client.get("/api/jobs/status").json()
     assert status["last_error"] == "provider down"
     assert status["last_success_at"] is None
 
 
-def test_watchlist_add_and_remove_refilters_without_fetch(tmp_path: Path, fetcher: FakeFetcher) -> None:
-    client = make_client(tmp_path, fetcher)
+def test_watchlist_add_and_remove_refilters_without_fetch(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher)
     client.post("/api/jobs/refresh")
     assert fetcher.calls == 1
 
@@ -167,21 +169,64 @@ def test_watchlist_add_and_remove_refilters_without_fetch(tmp_path: Path, fetche
     assert symbols == {"NVDA", "AAPL"}
     assert fetcher.calls == 1
 
-    assert (tmp_path / "watchlist.csv").read_text(encoding="utf-8") == "symbol,name\nNVDA,NVIDIA\nAAPL,Apple\n"
+    assert [i["symbol"] for i in client.get("/api/watchlist").json()["items"]] == ["AAPL", "NVDA"]
 
 
-def test_watchlist_validation(tmp_path: Path, fetcher: FakeFetcher) -> None:
-    client = make_client(tmp_path, fetcher)
+def test_watchlist_validation(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher)
     assert client.post("/api/watchlist", json={"symbol": "NVDA"}).status_code == 409
     assert client.post("/api/watchlist", json={"symbol": "bad symbol!"}).status_code == 422
     assert client.delete("/api/watchlist/NOPE").status_code == 404
     assert client.put("/api/watchlist", json=[]).status_code == 400
 
 
-def test_watchlist_replace(tmp_path: Path, fetcher: FakeFetcher) -> None:
-    client = make_client(tmp_path, fetcher)
+def test_watchlist_replace(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher)
     response = client.put("/api/watchlist", json=[{"symbol": "msft", "name": "Microsoft"}])
     assert response.status_code == 200
     assert response.json()["items"] == [{"symbol": "MSFT", "name": "Microsoft"}]
     # No raw cache yet -> caller is told new symbols need a refresh.
     assert response.json()["refiltered"] is False
+
+
+RAW_V3 = "\n".join([HEADER, "MSFT,MICROSOFT CORP,2026-10-21,2026-09-30,3.10,USD,post-market"])
+
+
+def test_past_events_and_reschedule_notices_survive_later_refreshes(database_url: str) -> None:
+    # V1 -> V2 reschedules NVDA; V3 no longer contains any NVDA row at all.
+    client = make_client(database_url, FakeFetcher(RAW_V1, RAW_V2, RAW_V3))
+    for _ in range(3):
+        client.post("/api/jobs/refresh")
+
+    reports = client.get("/api/reports").json()["reports"]
+    rows = [(r["symbol"], r["report_date"], r["rescheduled_to"], r["status"]) for r in reports]
+    assert rows == [
+        ("MSFT", "2026-10-21", None, "active"),
+        ("NVDA", "2026-10-28", "2026-10-29", "rescheduled"),
+        ("NVDA", "2026-10-29", None, "active"),
+    ]
+
+
+def test_state_persists_across_app_restart(database_url: str, fetcher: FakeFetcher) -> None:
+    first = make_client(database_url, fetcher)
+    first.post("/api/jobs/refresh")
+    second = make_client(database_url, fetcher, watchlist=False)
+    assert {i["symbol"] for i in second.get("/api/watchlist").json()["items"]} == {"NVDA", "MSFT"}
+    assert len(second.get("/api/reports").json()["reports"]) == 2
+    assert second.get("/api/jobs/status").json()["last_success_at"] is not None
+
+
+def test_removed_symbol_events_are_kept_but_hidden(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, fetcher)
+    client.post("/api/jobs/refresh")
+    client.delete("/api/watchlist/MSFT")
+    assert {r["symbol"] for r in client.get("/api/reports").json()["reports"]} == {"NVDA"}
+    everything = client.get("/api/reports", params={"include_unwatched": "true"}).json()["reports"]
+    assert {r["symbol"] for r in everything} == {"NVDA", "MSFT"}
+
+
+def test_sync_is_idempotent(database_url: str, fetcher: FakeFetcher) -> None:
+    client = make_client(database_url, FakeFetcher(RAW_V1))
+    client.post("/api/jobs/refresh")
+    client.post("/api/jobs/refresh")
+    assert len(client.get("/api/reports").json()["reports"]) == 2
