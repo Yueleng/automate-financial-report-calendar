@@ -7,6 +7,7 @@ import dayGridPlugin from "@fullcalendar/react/daygrid";
 import timeGridPlugin from "@fullcalendar/react/timegrid";
 import listPlugin from "@fullcalendar/react/list";
 import interactionPlugin from "@fullcalendar/react/interaction";
+import formaTheme from "@fullcalendar/react/themes/forma";
 import "@fullcalendar/react/skeleton.css";
 import "@fullcalendar/react/themes/forma/theme.css";
 
@@ -28,7 +29,8 @@ export function EarningsCalendar({ reports }: EarningsCalendarProps) {
   const events = useMemo(() => {
     return reports.map((r) => ({
       id: r.id,
-      title: `${r.symbol} · ${r.name}`,
+      title:
+        r.name && r.name !== r.symbol ? `${r.symbol} · ${r.name}` : r.symbol,
       start: r.report_date,
       allDay: true,
       extendedProps: {
@@ -48,8 +50,16 @@ export function EarningsCalendar({ reports }: EarningsCalendarProps) {
   return (
     <div className="w-full relative earnings-calendar-wrapper">
       <FullCalendar
-        plugins={[dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin]}
+        plugins={[
+          formaTheme,
+          dayGridPlugin,
+          timeGridPlugin,
+          listPlugin,
+          interactionPlugin,
+        ]}
         initialView="dayGridMonth"
+        colorScheme="dark"
+        dayHeaderFormat={{ weekday: "short" }}
         headerToolbar={{
           left: "prev,next today",
           center: "title",
@@ -82,9 +92,11 @@ export function EarningsCalendar({ reports }: EarningsCalendarProps) {
                   <span className="font-semibold line-through text-amber-300/80">
                     {report.symbol}
                   </span>
-                  <span className="truncate opacity-70 hidden sm:inline line-through">
-                    {report.name}
-                  </span>
+                  {report.name && report.name !== report.symbol && (
+                    <span className="truncate opacity-70 hidden sm:inline line-through">
+                      {report.name}
+                    </span>
+                  )}
                 </div>
                 <span className="text-[10px] bg-amber-500/20 px-1 py-0.2 rounded border border-amber-500/30 text-amber-200 font-mono shrink-0">
                   → {report.rescheduled_to}
@@ -106,9 +118,11 @@ export function EarningsCalendar({ reports }: EarningsCalendarProps) {
                 <span className="font-bold tracking-tight">
                   {report.symbol}
                 </span>
-                <span className="truncate opacity-80 hidden sm:inline">
-                  {report.name}
-                </span>
+                {report.name && report.name !== report.symbol && (
+                  <span className="truncate opacity-80 hidden sm:inline">
+                    {report.name}
+                  </span>
+                )}
               </div>
               {report.estimate && (
                 <span className="text-[10px] opacity-90 font-mono bg-black/20 px-1 rounded shrink-0">
