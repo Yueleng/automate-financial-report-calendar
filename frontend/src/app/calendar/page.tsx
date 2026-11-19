@@ -25,7 +25,12 @@ import { CalendarIcon, Share2Icon, ClockIcon } from "lucide-react";
 
 export default function CalendarPage() {
   // get reports data
-  const { data, error, isLoading, mutate } = useSWR(
+  const {
+    data,
+    error: reportsError,
+    isLoading: reportsLoading,
+    mutate,
+  } = useSWR(
     "/api/reports",
     // a complete request without params,
     // it fetches all upcoming reports as of now.
@@ -38,7 +43,14 @@ export default function CalendarPage() {
     },
   );
 
-  const { data: watchlistData } = useSWR("/api/watchlist", fetchWatchlist);
+  const {
+    data: watchlistData,
+    error: watchlistError,
+    isLoading: watchlistLoading,
+  } = useSWR("/api/watchlist", fetchWatchlist);
+
+  const isLoading = reportsLoading || watchlistLoading;
+  const error = reportsError ?? watchlistError;
 
   // derive the reports data from the fetched data
   const reports = useMemo(() => data?.reports ?? [], [data]);
@@ -48,17 +60,11 @@ export default function CalendarPage() {
   // or appearing after a refresh are visible by default.
   const [hiddenSymbols, setHiddenSymbols] = useState<string[]>([]);
 
-  // derive all symbols from the watchlist and reports data
-  const allSymbols = useMemo(() => {
-    const symbols = new Set<string>();
-    for (const item of watchlistData?.items ?? []) {
-      symbols.add(item.symbol);
-    }
-    for (const r of reports) {
-      symbols.add(r.symbol);
-    }
-    return Array.from(symbols).sort();
-  }, [watchlistData, reports]);
+  // derive all symbols from the watchlist (single source of truth)
+  const allSymbols = useMemo(
+    () => (watchlistData?.items ?? []).map((item) => item.symbol).sort(),
+    [watchlistData],
+  );
 
   // derive the active selected symbols from the all symbols and hidden symbols
   // algo: allSymbols - hiddenSymbols
