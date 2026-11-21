@@ -3,7 +3,12 @@
 import { useState, useMemo } from "react";
 import useSWR from "swr";
 import { toast } from "sonner";
-import { ApiError, fetchReports, getCalendarIcsUrl } from "@/lib/api";
+import {
+  ApiError,
+  fetchReports,
+  fetchWatchlist,
+  getCalendarIcsUrl,
+} from "@/lib/api";
 import { EarningsCalendar } from "@/components/earnings-calendar";
 import { SymbolFilter } from "@/components/symbol-filter";
 import { RefreshButton } from "@/components/refresh-button";
@@ -20,7 +25,12 @@ import { CalendarIcon, Share2Icon, ClockIcon } from "lucide-react";
 
 export default function CalendarPage() {
   // get reports data
-  const { data, error, isLoading, mutate } = useSWR(
+  const {
+    data,
+    error: reportsError,
+    isLoading: reportsLoading,
+    mutate,
+  } = useSWR(
     "/api/reports",
     // a complete request without params,
     // it fetches all upcoming reports as of now.
@@ -33,6 +43,15 @@ export default function CalendarPage() {
     },
   );
 
+  const {
+    data: watchlistData,
+    error: watchlistError,
+    isLoading: watchlistLoading,
+  } = useSWR("/api/watchlist", fetchWatchlist);
+
+  const isLoading = reportsLoading || watchlistLoading;
+  const error = reportsError ?? watchlistError;
+
   // derive the reports data from the fetched data
   const reports = useMemo(() => data?.reports ?? [], [data]);
   const updatedAt = data?.updated_at ?? null;
@@ -41,10 +60,11 @@ export default function CalendarPage() {
   // or appearing after a refresh are visible by default.
   const [hiddenSymbols, setHiddenSymbols] = useState<string[]>([]);
 
-  // derive the all symbols from the reports data
-  const allSymbols = useMemo(() => {
-    return Array.from(new Set(reports.map((r) => r.symbol))).sort();
-  }, [reports]);
+  // derive all symbols from the watchlist (single source of truth)
+  const allSymbols = useMemo(
+    () => (watchlistData?.items ?? []).map((item) => item.symbol).sort(),
+    [watchlistData],
+  );
 
   // derive the active selected symbols from the all symbols and hidden symbols
   // algo: allSymbols - hiddenSymbols
@@ -57,11 +77,14 @@ export default function CalendarPage() {
   // represented as symbol: count, e.g.{"MSFT": 1, "AAPL": 2, ...}
   const symbolCounts = useMemo(() => {
     const counts: Record<string, number> = {};
+    for (const s of allSymbols) {
+      counts[s] = 0;
+    }
     for (const r of reports) {
       counts[r.symbol] = (counts[r.symbol] || 0) + 1;
     }
     return counts;
-  }, [reports]);
+  }, [allSymbols, reports]);
 
   // get filtered reports data (with the active selected symbols)
   const filteredReports = useMemo(() => {
