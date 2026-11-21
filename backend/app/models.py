@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from sqlalchemy import ARRAY, BigInteger, Boolean, Date, DateTime, Index, Integer, Text, UniqueConstraint, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy import ARRAY, BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Integer, Text, UniqueConstraint, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 
@@ -39,6 +39,29 @@ class EarningsEventRow(Base):
     rescheduled_to: Mapped[date | None] = mapped_column(Date, nullable=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    attachments: Mapped[list["ReportAttachment"]] = relationship(
+        back_populates="event",
+        cascade="all, delete-orphan",
+        order_by="ReportAttachment.uploaded_at.desc()",
+    )
+
+
+class ReportAttachment(Base):
+    """Metadata for a PDF financial report attached to an earnings event."""
+
+    __tablename__ = "report_attachments"
+    __table_args__ = (Index("ix_report_attachments_event_id", "event_id"),)
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    event_id: Mapped[str] = mapped_column(Text, ForeignKey("earnings_events.id", ondelete="CASCADE"))
+    filename: Mapped[str] = mapped_column(Text)
+    content_type: Mapped[str] = mapped_column(Text, default="application/pdf")
+    size_bytes: Mapped[int] = mapped_column(BigInteger)
+    storage_key: Mapped[str] = mapped_column(Text, unique=True)
+    uploaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    event: Mapped[EarningsEventRow] = relationship(back_populates="attachments")
 
 
 class ProviderSnapshot(Base):
