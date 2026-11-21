@@ -73,10 +73,10 @@ export function EarningsCalendar({ reports }: EarningsCalendarProps) {
           const report: Report = eventInfo.event.extendedProps.report;
           if (!report) return null;
 
-          const isRescheduled = Boolean(report.rescheduled_to);
           const color = getSymbolColor(report.symbol);
 
-          if (isRescheduled) {
+          if (report.rescheduled_to) {
+            const arrow = report.report_date > report.rescheduled_to ? "←" : "→";
             return (
               <div
                 className="w-full truncate px-2 py-1 text-xs rounded border transition-all cursor-pointer flex items-center justify-between gap-1 shadow-sm"
@@ -99,7 +99,7 @@ export function EarningsCalendar({ reports }: EarningsCalendarProps) {
                   )}
                 </div>
                 <span className="text-[10px] bg-amber-500/20 px-1 py-0.2 rounded border border-amber-500/30 text-amber-200 font-mono shrink-0">
-                  → {report.rescheduled_to}
+                  {arrow} {report.rescheduled_to}
                 </span>
               </div>
             );
