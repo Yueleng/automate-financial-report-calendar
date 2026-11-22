@@ -151,15 +151,15 @@ export function EventDialog({
         className={
           isPreviewOpen
             ? "sm:max-w-6xl w-[95vw] h-[88vh] p-0 gap-0 overflow-hidden border-border/40 bg-background/95 backdrop-blur-xl shadow-2xl flex flex-col lg:flex-row transition-[max-width,height] duration-200"
-            : "sm:max-w-lg max-h-[85vh] overflow-y-auto border-border/40 bg-background/95 backdrop-blur-xl p-6 shadow-2xl transition-[max-width] duration-200"
+            : "sm:max-w-lg max-h-[85vh] overflow-y-auto overflow-x-hidden border-border/40 bg-background/95 backdrop-blur-xl p-6 shadow-2xl transition-[max-width] duration-200"
         }
       >
         {/* Left Column: Event Details & Attachments */}
         <div
           className={
             isPreviewOpen
-              ? "w-full lg:w-[380px] lg:shrink-0 border-b lg:border-b-0 lg:border-r border-border/40 p-5 overflow-y-auto flex flex-col gap-4 max-h-[38vh] lg:max-h-none"
-              : "flex flex-col gap-4"
+              ? "w-full lg:w-[380px] lg:shrink-0 min-w-0 border-b lg:border-b-0 lg:border-r border-border/40 p-5 overflow-y-auto overflow-x-hidden flex flex-col gap-4 max-h-[38vh] lg:max-h-none"
+              : "flex flex-col gap-4 min-w-0"
           }
         >
           <DialogHeader className="gap-1.5 pb-2 border-b border-border/40">
@@ -263,8 +263,8 @@ export function EventDialog({
           </div>
 
           {/* Attachments Section */}
-          <div className="space-y-2.5 pt-2 border-t border-border/40">
-            <div className="flex items-center justify-between">
+          <div className="space-y-2.5 pt-2 border-t border-border/40 min-w-0">
+            <div className="flex items-center justify-between gap-2 min-w-0">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-muted-foreground flex items-center gap-1.5">
                 <FileTextIcon className="w-3.5 h-3.5" />
                 Financial Reports ({attachments.length})
@@ -317,7 +317,7 @@ export function EventDialog({
                   void handleFiles(e.dataTransfer.files);
                 }
               }}
-              className={`rounded-lg border border-dashed transition-colors ${
+              className={`min-w-0 overflow-hidden rounded-lg border border-dashed transition-colors ${
                 isDragging
                   ? "border-blue-400 bg-blue-500/10"
                   : "border-border/40 bg-card/30"
@@ -337,14 +337,14 @@ export function EventDialog({
                   </span>
                 </button>
               ) : (
-                <ul className="space-y-1.5">
+                <ul className="space-y-1.5 min-w-0">
                   {attachments.map((att) => {
                     const isActive = previewAttachment?.id === att.id;
                     const isDeleting = deletingId === att.id;
                     return (
                       <li
                         key={att.id}
-                        className={`flex items-center justify-between gap-2 rounded-md border px-2.5 py-2 text-xs transition-colors ${
+                        className={`flex items-center justify-between gap-2 min-w-0 overflow-hidden rounded-md border px-2.5 py-2 text-xs transition-colors ${
                           isActive
                             ? "border-blue-500/60 bg-blue-500/10"
                             : "border-border/30 bg-background/50 hover:bg-accent/40"
@@ -355,8 +355,8 @@ export function EventDialog({
                           onClick={() =>
                             setPreviewAttachmentId(isActive ? null : att.id)
                           }
-                          className="flex items-center gap-2 min-w-0 flex-1 text-left cursor-pointer"
-                          title={`Preview ${att.filename}`}
+                          className="flex items-center gap-2 min-w-0 flex-1 overflow-hidden text-left cursor-pointer"
+                          title={att.filename}
                         >
                           <FileTextIcon
                             className={`w-4 h-4 shrink-0 ${

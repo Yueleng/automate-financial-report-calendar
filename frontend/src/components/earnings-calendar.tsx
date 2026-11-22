@@ -50,7 +50,7 @@ export function EarningsCalendar({
 
   const handleEventClick = (info: EventClickInfo) => {
     const report = info.event.extendedProps?.report as Report | undefined;
-    if (report) {
+    if (report && !report.rescheduled_to) {
       setSelectedReportId(report.id);
       setDialogOpen(true);
     }
@@ -89,7 +89,7 @@ export function EarningsCalendar({
               report.report_date > report.rescheduled_to ? "←" : "→";
             return (
               <div
-                className="w-full truncate px-2 py-1 text-xs rounded border transition-all cursor-pointer flex items-center justify-between gap-1 shadow-sm"
+                className="w-full truncate px-2 py-1 text-xs rounded border transition-all cursor-default flex items-center justify-between gap-1 shadow-sm"
                 style={{
                   backgroundColor: RESCHEDULED_STYLE.bg,
                   borderColor: RESCHEDULED_STYLE.border,
