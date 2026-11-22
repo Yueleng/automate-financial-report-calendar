@@ -5,10 +5,10 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 
 from sqlalchemy import delete, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from .domain import Company, EarningsEvent, event_uid
-from .models import EarningsEventRow, JobRun, ProviderSnapshot, WatchlistItem
+from .models import EarningsEventRow, JobRun, ProviderSnapshot, ReportAttachment, WatchlistItem
 
 
 def utcnow() -> datetime:
@@ -79,7 +79,7 @@ class EventRepo:
         symbols: set[str] | None = None,
         include_unwatched: bool = False,
     ) -> list[EarningsEventRow]:
-        stmt = select(EarningsEventRow)
+        stmt = select(EarningsEventRow).options(selectinload(EarningsEventRow.attachments))
         if start is not None:
             stmt = stmt.where(EarningsEventRow.report_date >= start)
         if end is not None:
@@ -188,3 +188,53 @@ class JobRepo:
 
     def has_events(self) -> bool:
         return self.session.scalar(select(EarningsEventRow.id).limit(1)) is not None
+
+
+class AttachmentRepo:
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def event_exists(self, event_id: str) -> bool:
+        return self.session.get(EarningsEventRow, event_id) is not None
+
+    def list_for_event(self, event_id: str) -> list[ReportAttachment]:
+        stmt = (
+            select(ReportAttachment)
+            .where(ReportAttachment.event_id == event_id)
+            .order_by(ReportAttachment.uploaded_at.desc())
+        )
+        return list(self.session.scalars(stmt))
+
+    def get(self, attachment_id: str) -> ReportAttachment | None:
+        return self.session.get(ReportAttachment, attachment_id)
+
+    def create(
+        self,
+        *,
+        attachment_id: str,
+        event_id: str,
+        filename: str,
+        content_type: str,
+        size_bytes: int,
+        storage_key: str,
+    ) -> ReportAttachment:
+        row = ReportAttachment(
+            id=attachment_id,
+            event_id=event_id,
+            filename=filename,
+            content_type=content_type,
+            size_bytes=size_bytes,
+            storage_key=storage_key,
+            uploaded_at=utcnow(),
+        )
+        self.session.add(row)
+        self.session.flush()
+        return row
+
+    def delete(self, attachment_id: str) -> ReportAttachment | None:
+        row = self.session.get(ReportAttachment, attachment_id)
+        if row is None:
+            return None
+        self.session.delete(row)
+        self.session.flush()
+        return row
