@@ -39,3 +39,6 @@ pip-wheel-metadata/
 frontend/node_modules/
 frontend/.next/
 frontend/.env*.local
+
+# Local uploaded PDF attachments
+data/uploads/

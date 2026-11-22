@@ -68,6 +68,14 @@ class Settings:
     cors_origins: list[str] = field(default_factory=lambda: ["http://localhost:3000"])
     # Tests disable the background scheduler so no real network call happens.
     scheduler_enabled: bool = True
+    # Attachment storage: "local" (default for dev) or "s3" (AWS S3 / R2 / MinIO).
+    storage_backend: str = "local"
+    local_storage_dir: Path = field(default_factory=lambda: PROJECT_ROOT / "data" / "uploads")
+    s3_bucket: str = ""
+    s3_region: str = "us-east-1"
+    s3_prefix: str = "attachments"
+    s3_endpoint_url: str | None = None
+    max_upload_bytes: int = 50 * 1024 * 1024  # 50 MB
 
     # @classmethod - Binds the method to the class itself, rather than to a specific
     # instance (self). The first parameter passed is cls (the class itself, e.g., Settings),
@@ -76,6 +84,7 @@ class Settings:
     # variables.
     @classmethod
     def from_env(cls) -> "Settings":
+        local_dir = _env("LOCAL_STORAGE_DIR", "")
         return cls(
             alphavantage_api_key=_env("ALPHAVANTAGE_API_KEY", ""),
             database_url=_env("DATABASE_URL", DEFAULT_DATABASE_URL),
@@ -89,4 +98,11 @@ class Settings:
                 if origin.strip()
             ],
             scheduler_enabled=_env("SCHEDULER_ENABLED", "true").lower() not in {"0", "false", "no"},
+            storage_backend=_env("STORAGE_BACKEND", "local"),
+            local_storage_dir=Path(local_dir) if local_dir else PROJECT_ROOT / "data" / "uploads",
+            s3_bucket=_env("S3_BUCKET", ""),
+            s3_region=_env("S3_REGION", "us-east-1"),
+            s3_prefix=_env("S3_PREFIX", "attachments"),
+            s3_endpoint_url=_env("S3_ENDPOINT_URL", "") or None,
+            max_upload_bytes=int(_env("MAX_UPLOAD_BYTES", str(50 * 1024 * 1024))),
         )
