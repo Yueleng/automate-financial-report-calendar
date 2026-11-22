@@ -14,7 +14,7 @@ from alembic.config import Config
 from sqlalchemy import Engine, create_engine, text
 
 DEFAULT_TEST_URL = "postgresql+psycopg://fin:fin@localhost:5433/fin_test"
-TABLES = "watchlist_items, earnings_events, provider_snapshots, job_runs"
+TABLES = "report_attachments, watchlist_items, earnings_events, provider_snapshots, job_runs"
 
 
 @pytest.fixture(scope="session")
