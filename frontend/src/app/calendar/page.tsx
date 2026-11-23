@@ -223,7 +223,10 @@ export default function CalendarPage() {
               </p>
             </div>
           ) : (
-            <EarningsCalendar reports={filteredReports} />
+            <EarningsCalendar
+              reports={filteredReports}
+              onReportsChange={() => mutate()}
+            />
           )}
         </CardContent>
       </Card>

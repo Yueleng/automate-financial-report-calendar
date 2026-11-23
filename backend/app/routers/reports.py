@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session
 from ..db import get_session
 from ..domain import build_calendar
 from ..repositories import EventRepo, row_to_event
-from ..schemas import Report, ReportsResponse
+from ..schemas import Attachment, Report, ReportsResponse
 
 router = APIRouter(tags=["reports"])
 
@@ -48,6 +48,17 @@ def list_reports(
             status="rescheduled" if row.rescheduled_to else "active",
             first_seen_at=row.first_seen_at,
             last_seen_at=row.last_seen_at,
+            attachments=[
+                Attachment(
+                    id=att.id,
+                    event_id=att.event_id,
+                    filename=att.filename,
+                    content_type=att.content_type,
+                    size_bytes=att.size_bytes,
+                    uploaded_at=att.uploaded_at,
+                )
+                for att in row.attachments
+            ],
         )
         for row in rows
     ]

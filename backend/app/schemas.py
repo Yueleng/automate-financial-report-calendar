@@ -9,6 +9,15 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 
+class Attachment(BaseModel):
+    id: str
+    event_id: str
+    filename: str
+    content_type: str
+    size_bytes: int
+    uploaded_at: datetime
+
+
 class Report(BaseModel):
     id: str
     symbol: str
@@ -21,6 +30,7 @@ class Report(BaseModel):
     status: Literal["active", "rescheduled"] = "active"
     first_seen_at: datetime | None = None
     last_seen_at: datetime | None = None
+    attachments: list[Attachment] = Field(default_factory=list)
 
 
 class ReportsResponse(BaseModel):

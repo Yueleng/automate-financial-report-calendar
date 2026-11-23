@@ -1,3 +1,12 @@
+export interface Attachment {
+  id: string;
+  event_id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  uploaded_at: string;
+}
+
 export interface Report {
   id: string;
   symbol: string;
@@ -10,6 +19,7 @@ export interface Report {
   status: "active" | "rescheduled";
   first_seen_at: string | null;
   last_seen_at: string | null;
+  attachments: Attachment[];
 }
 
 export interface ReportsResponse {
@@ -133,4 +143,63 @@ export async function triggerRefresh(): Promise<JobStatusResponse> {
 
 export function getCalendarIcsUrl(): string {
   return "/api/calendar.ics";
+}
+
+export function getAttachmentFileUrl(attachmentId: string): string {
+  return `/api/attachments/${encodeURIComponent(attachmentId)}/file`;
+}
+
+export async function uploadReportAttachment(
+  eventId: string,
+  file: File,
+): Promise<Attachment> {
+  const formData = new FormData();
+  formData.append("file", file);
+
+  const res = await fetch(
+    `/api/reports/${encodeURIComponent(eventId)}/attachments`,
+    {
+      method: "POST",
+      body: formData,
+    },
+  );
+
+  if (!res.ok) {
+    let errorMessage = `HTTP ${res.status}: ${res.statusText}`;
+    let data: unknown;
+    try {
+      data = await res.json();
+      if (typeof data === "object" && data !== null && "detail" in data) {
+        errorMessage = String((data as { detail: unknown }).detail);
+      }
+    } catch {
+      // not JSON
+    }
+    throw new ApiError(res.status, errorMessage, data);
+  }
+
+  return res.json() as Promise<Attachment>;
+}
+
+export async function deleteAttachment(attachmentId: string): Promise<void> {
+  const res = await fetch(
+    `/api/attachments/${encodeURIComponent(attachmentId)}`,
+    {
+      method: "DELETE",
+    },
+  );
+
+  if (!res.ok) {
+    let errorMessage = `HTTP ${res.status}: ${res.statusText}`;
+    let data: unknown;
+    try {
+      data = await res.json();
+      if (typeof data === "object" && data !== null && "detail" in data) {
+        errorMessage = String((data as { detail: unknown }).detail);
+      }
+    } catch {
+      // not JSON
+    }
+    throw new ApiError(res.status, errorMessage, data);
+  }
 }

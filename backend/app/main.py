@@ -16,16 +16,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import Settings
 from .jobs import Fetcher, RefreshService
-from .routers import jobs, reports, watchlist
+from .routers import attachments, jobs, reports, watchlist
 from .db import make_engine, make_session_factory
+from .storage import StorageBackend, make_storage
 
 
-def create_app(settings: Settings | None = None, fetcher: Fetcher | None = None) -> FastAPI:
+def create_app(
+    settings: Settings | None = None,
+    fetcher: Fetcher | None = None,
+    storage: StorageBackend | None = None,
+) -> FastAPI:
     # Called directly on the class
     settings = settings or Settings.from_env()
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
     refresh = RefreshService(settings, engine, session_factory, fetcher=fetcher)
+    storage_backend = storage or make_storage(settings)
 
     # @asynccontextmanager - Context manager for managing the application lifecycle.
     # lifespan is called automatically when the application starts and stops.
@@ -45,6 +51,7 @@ def create_app(settings: Settings | None = None, fetcher: Fetcher | None = None)
     app.state.engine = engine
     app.state.session_factory = session_factory
     app.state.refresh = refresh
+    app.state.storage = storage_backend
 
     app.add_middleware(
         CORSMiddleware,
@@ -58,6 +65,7 @@ def create_app(settings: Settings | None = None, fetcher: Fetcher | None = None)
         return {"status": "ok"}
 
     app.include_router(reports.router, prefix="/api")
+    app.include_router(attachments.router, prefix="/api")
     app.include_router(watchlist.router, prefix="/api")
     app.include_router(jobs.router, prefix="/api")
     return app

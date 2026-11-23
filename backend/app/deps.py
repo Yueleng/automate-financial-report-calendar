@@ -5,6 +5,7 @@ from __future__ import annotations
 from fastapi import Request
 
 from .jobs import RefreshService
+from .storage import StorageBackend
 
 
 # FastAPI's dependency injection system:
@@ -14,3 +15,7 @@ from .jobs import RefreshService
 # - Caches the dependency result per request (Depends default: use_cache=True).
 def get_refresh(request: Request) -> RefreshService:
     return request.app.state.refresh
+
+
+def get_storage(request: Request) -> StorageBackend:
+    return request.app.state.storage
