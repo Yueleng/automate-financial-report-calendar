@@ -49,6 +49,7 @@ class EarningsEvent:
     estimate: str = ""
     currency: str = ""
     rescheduled_to: date | None = None
+    source: str = "alpha_vantage"
 
 
 def fetch_alpha_vantage_csv(api_key: str, horizon: str) -> str:
@@ -187,7 +188,8 @@ def event_description(event: EarningsEvent) -> str:
         lines.append(f"EPS estimate: {event.estimate}{suffix}")
     if event.rescheduled_to:
         lines.append(f"Rescheduled to: {event.rescheduled_to.isoformat()}")
-    lines.append("Source: Alpha Vantage Earnings Calendar")
+    source_label = "Manual entry" if event.source == "manual" else "Alpha Vantage Earnings Calendar"
+    lines.append(f"Source: {source_label}")
     return "\n".join(lines)
 
 
