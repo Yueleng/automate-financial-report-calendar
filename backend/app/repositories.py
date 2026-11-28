@@ -2,13 +2,28 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, timezone
+import uuid
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session, selectinload
 
 from .domain import Company, EarningsEvent, event_uid
 from .models import EarningsEventRow, JobRun, ProviderSnapshot, ReportAttachment, WatchlistItem
+
+PROXIMITY_WARNING_DAYS = 60
+
+
+@dataclass(frozen=True)
+class EventConflict:
+    event_id: str
+    symbol: str
+    report_date: date
+    fiscal_date_ending: date
+    days_apart: int
+    source: str
+    reason: str  # "duplicate_date" | "duplicate_fiscal_period" | "proximity"
 
 
 def utcnow() -> datetime:
@@ -65,6 +80,7 @@ def row_to_event(row: EarningsEventRow) -> EarningsEvent:
         estimate=row.estimate,
         currency=row.currency,
         rescheduled_to=row.rescheduled_to,
+        source=row.source,
     )
 
 
@@ -72,12 +88,21 @@ class EventRepo:
     def __init__(self, session: Session) -> None:
         self.session = session
 
+    def get(self, event_id: str) -> EarningsEventRow | None:
+        stmt = (
+            select(EarningsEventRow)
+            .options(selectinload(EarningsEventRow.attachments))
+            .where(EarningsEventRow.id == event_id)
+        )
+        return self.session.scalar(stmt)
+
     def query(
         self,
         start: date | None = None,
         end: date | None = None,
         symbols: set[str] | None = None,
         include_unwatched: bool = False,
+        exclude_manual: bool = False,
     ) -> list[EarningsEventRow]:
         stmt = select(EarningsEventRow).options(selectinload(EarningsEventRow.attachments))
         if start is not None:
@@ -88,6 +113,8 @@ class EventRepo:
             stmt = stmt.where(EarningsEventRow.symbol.in_(symbols))
         if not include_unwatched:
             stmt = stmt.where(EarningsEventRow.symbol.in_(select(WatchlistItem.symbol)))
+        if exclude_manual:
+            stmt = stmt.where(EarningsEventRow.source != "manual")
         stmt = stmt.order_by(
             EarningsEventRow.report_date,
             EarningsEventRow.symbol,
@@ -95,12 +122,112 @@ class EventRepo:
         )
         return list(self.session.scalars(stmt))
 
+    def find_conflicts(
+        self,
+        symbol: str,
+        report_date: date,
+        fiscal_date_ending: date,
+        *,
+        proximity_days: int = PROXIMITY_WARNING_DAYS,
+        exclude_event_id: str | None = None,
+    ) -> list[EventConflict]:
+        """Find duplicate or nearby active events for the same symbol."""
+        stmt = (
+            select(EarningsEventRow)
+            .where(EarningsEventRow.symbol == symbol)
+            .where(EarningsEventRow.rescheduled_to.is_(None))
+        )
+        if exclude_event_id is not None:
+            stmt = stmt.where(EarningsEventRow.id != exclude_event_id)
+
+        conflicts: list[EventConflict] = []
+        for row in self.session.scalars(stmt):
+            days_apart = abs((row.report_date - report_date).days)
+            if row.report_date == report_date:
+                reason = "duplicate_date"
+            elif row.fiscal_date_ending == fiscal_date_ending:
+                reason = "duplicate_fiscal_period"
+            elif days_apart <= proximity_days:
+                reason = "proximity"
+            else:
+                continue
+            conflicts.append(
+                EventConflict(
+                    event_id=row.id,
+                    symbol=row.symbol,
+                    report_date=row.report_date,
+                    fiscal_date_ending=row.fiscal_date_ending,
+                    days_apart=days_apart,
+                    source=row.source,
+                    reason=reason,
+                )
+            )
+        conflicts.sort(key=lambda c: (c.reason != "duplicate_date", c.days_apart, c.report_date))
+        return conflicts
+
+    def create_manual(
+        self,
+        *,
+        symbol: str,
+        name: str,
+        report_date: date,
+        fiscal_date_ending: date,
+        estimate: str = "",
+        currency: str = "",
+        now: datetime | None = None,
+    ) -> EarningsEventRow:
+        now = now or utcnow()
+        row = EarningsEventRow(
+            id=f"manual-{uuid.uuid4().hex[:16]}",
+            symbol=symbol,
+            name=name,
+            report_date=report_date,
+            fiscal_date_ending=fiscal_date_ending,
+            estimate=estimate,
+            currency=currency if estimate else "",
+            source="manual",
+            rescheduled_to=None,
+            first_seen_at=now,
+            last_seen_at=now,
+        )
+        self.session.add(row)
+        self.session.flush()
+        return row
+
+    def update_manual(
+        self,
+        row: EarningsEventRow,
+        *,
+        symbol: str,
+        name: str,
+        report_date: date,
+        fiscal_date_ending: date,
+        estimate: str = "",
+        currency: str = "",
+        now: datetime | None = None,
+    ) -> EarningsEventRow:
+        row.symbol = symbol
+        row.name = name
+        row.report_date = report_date
+        row.fiscal_date_ending = fiscal_date_ending
+        row.estimate = estimate
+        row.currency = currency if estimate else ""
+        row.last_seen_at = now or utcnow()
+        self.session.flush()
+        return row
+
+    def delete_manual(self, row: EarningsEventRow) -> list[str]:
+        storage_keys = [att.storage_key for att in row.attachments]
+        self.session.delete(row)
+        self.session.flush()
+        return storage_keys
+
     def sync(self, parsed: list[EarningsEvent], now: datetime | None = None) -> None:
         """Upsert provider rows; turn superseded dates into permanent reschedule notices.
 
         Rows are never deleted, so past events and notices stay available. A stored
-        active row becomes a notice when the provider reports the same fiscal period
-        under a different date.
+        active provider row becomes a notice when the provider reports the same fiscal
+        period under a different date. Manual rows are never modified by sync.
         """
         now = now or utcnow()
         current_dates: dict[tuple[str, date], date] = {}
@@ -119,12 +246,13 @@ class EventRepo:
                         fiscal_date_ending=fiscal,
                         estimate=event.estimate,
                         currency=event.currency,
+                        source="alpha_vantage",
                         rescheduled_to=None,
                         first_seen_at=now,
                         last_seen_at=now,
                     )
                 )
-            else:
+            elif row.source != "manual":
                 row.name = event.name
                 row.estimate = event.estimate
                 row.currency = event.currency
@@ -134,7 +262,9 @@ class EventRepo:
 
         active_dates = {(e.symbol, date.fromisoformat(e.fiscal_date_ending), e.report_date) for e in parsed}
         stored = self.session.scalars(
-            select(EarningsEventRow).where(EarningsEventRow.symbol.in_({s for s, _ in current_dates}))
+            select(EarningsEventRow)
+            .where(EarningsEventRow.symbol.in_({s for s, _ in current_dates}))
+            .where(EarningsEventRow.source != "manual")
         )
         # Detect superseded date and mark the old event if it was rescheduled
         for row in stored:

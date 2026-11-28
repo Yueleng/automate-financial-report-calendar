@@ -6,7 +6,7 @@ from datetime import date, datetime
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class Attachment(BaseModel):
@@ -26,11 +26,42 @@ class Report(BaseModel):
     fiscal_date_ending: date
     estimate: str
     currency: str
+    source: Literal["alpha_vantage", "manual"] = "alpha_vantage"
     rescheduled_to: date | None = None
     status: Literal["active", "rescheduled"] = "active"
     first_seen_at: datetime | None = None
     last_seen_at: datetime | None = None
     attachments: list[Attachment] = Field(default_factory=list)
+
+
+class ManualReportPayload(BaseModel):
+    symbol: str = Field(min_length=1, max_length=15, pattern=r"^[A-Za-z0-9.\-]+$")
+    report_date: date
+    fiscal_date_ending: date
+    estimate: str = Field(default="", max_length=32)
+    currency: str = Field(default="USD", max_length=10)
+    force: bool = False
+
+    @field_validator("symbol")
+    @classmethod
+    def _upper_symbol(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @field_validator("estimate")
+    @classmethod
+    def _strip_estimate(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("currency")
+    @classmethod
+    def _upper_currency(cls, value: str) -> str:
+        return value.strip().upper()
+
+    @model_validator(mode="after")
+    def _check_fiscal_before_report(self) -> "ManualReportPayload":
+        if self.fiscal_date_ending > self.report_date:
+            raise ValueError("Fiscal period end date cannot be after the report date.")
+        return self
 
 
 class ReportsResponse(BaseModel):
